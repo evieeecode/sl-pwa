@@ -1,4 +1,4 @@
-const CACHE_NAME = 'shenlun-eightfold-v5';
+const CACHE_NAME = 'shenlun-eightfold-v6';
 const CORE = [
   './',
   './index.html',
@@ -6,7 +6,16 @@ const CORE = [
   './app.js',
   './manifest.json',
   './icons/icon-192.png',
-  './icons/icon-512.png'
+  './icons/icon-512.png',
+  './icons/flame.svg',
+  './icons/heart.svg',
+  './icons/home.svg',
+  './icons/library.svg',
+  './icons/practice.svg',
+  './icons/setting.svg',
+  './icons/statistics.svg',
+  './icons/trophy.svg',
+  './icons/XP.svg'
 ];
 
 self.addEventListener('install', event => {

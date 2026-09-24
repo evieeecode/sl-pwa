@@ -225,7 +225,7 @@ async function saveMeta() { await idbPut(STORE_META, {key:'app', value: state.me
 
 function applyTheme() {
   document.documentElement.dataset.theme = state.meta.theme || 'light';
-  $('meta[name="theme-color"]').setAttribute('content', state.meta.theme === 'dark' ? '#101116' : '#f6f7fb');
+  $('meta[name="theme-color"]').setAttribute('content', state.meta.theme === 'dark' ? '#0d1826' : '#dff2ff');
 }
 
 function corpus(category) { return state.corpus.filter(x=>x.category===category); }
@@ -498,7 +498,7 @@ function buildPracticeHTML() {
         <div class="timer-wrap"><span id="timer" class="timer ${p.mode === 'countdown' && remaining <= 10 ? 'danger' : ''}">${formatSeconds(displaySeconds)}</span>${p.mode === 'countdown' ? `<span id="lifeRow" class="life-row">${'♥'.repeat(p.hearts)}${'♡'.repeat(Math.max(0, 3-p.hearts))}</span>` : ''}<button id="exitPractice" class="exit-btn">退出</button></div>
       </div>
       <div class="progress-track slim"><div class="progress-fill" style="width:${percent}%"></div></div>
-      <div class="practice-submeta"><span>🔥 ${p.combo}</span><span>⚡ ${p.roundXP} XP</span><div class="head-actions"><button id="rerollBtn" class="head-btn" aria-label="重新出题">↻</button><button id="abandonBtn" class="head-btn">放弃本题</button></div></div>
+      <div class="practice-submeta"><span class="metric-inline"><img src="icons/flame.svg" alt="" aria-hidden="true">${p.combo}</span><span class="metric-inline"><img src="icons/XP.svg" alt="" aria-hidden="true">${p.roundXP} XP</span><div class="head-actions"><button id="rerollBtn" class="head-btn" aria-label="重新出题">↻</button><button id="abandonBtn" class="head-btn">放弃本题</button></div></div>
     </section>
 
     <section class="topic-card compact-topic">
@@ -588,9 +588,9 @@ function renderPractice(options = {}) {
 function updateTopStats() {
   const p = state.practice;
   if (!p) { $('#topStats').hidden = true; return; }
-  $('#heartPill').textContent = `❤ ${p.hearts}`;
-  $('#xpPill').textContent = `XP ${state.meta.xp}`;
-  $('#comboPill').textContent = `🔥 ${p.combo}`;
+  $('#heartPill').innerHTML = `<img class="stat-icon" src="icons/heart.svg" alt="" aria-hidden="true"><span>${p.hearts}</span>`;
+  $('#xpPill').innerHTML = `<img class="stat-icon" src="icons/XP.svg" alt="" aria-hidden="true"><span>${state.meta.xp}</span>`;
+  $('#comboPill').innerHTML = `<img class="stat-icon" src="icons/flame.svg" alt="" aria-hidden="true"><span>${p.combo}</span>`;
 }
 
 function bindPractice() {
@@ -1085,7 +1085,7 @@ function renderToday(){
   const rank=rankForXP(state.meta.xp);
   $('#main').innerHTML=`<div class="page">
     <div class="hero-card card">
-      <div class="row row-between"><div><div class="page-title">${rec?'今日已打卡':'今天还没打卡'}</div><div class="page-subtitle">${rec?'20题完成。今天写过的三句分论点，也在这里留着。':'完成一局 20 题即可自动打卡。'}</div></div><div class="check-icon">${rec?'✅':'☀️'}</div></div>
+      <div class="row row-between"><div><div class="page-title">${rec?'今日已打卡':'今天还没打卡'}</div><div class="page-subtitle">${rec?'20题完成。今天写过的三句分论点，也在这里留着。':'完成一局 20 题即可自动打卡。'}</div></div><div class="check-icon"><img src="icons/${rec?'trophy':'practice'}.svg" alt="" aria-hidden="true"></div></div>
       <div class="row" style="margin-top:12px"><button class="btn primary" id="todayPractice">${rec?'再练一局':'开始今天的练习'}</button>${getMakeupCandidates().length?'<button class="btn ghost" id="makeupBtn">补签</button>':''}</div>
     </div>
     <div class="stat-grid"><div class="stat-card"><div class="stat-value">${streak.current}</div><div class="stat-label">当前连续天数</div></div><div class="stat-card"><div class="stat-value">${streak.longest}</div><div class="stat-label">最长连续天数</div></div><div class="stat-card"><div class="stat-value">${state.meta.xp}</div><div class="stat-label">累计经验</div></div><div class="stat-card"><div class="stat-value">${rank.name}</div><div class="stat-label">当前段位</div></div></div>
@@ -1266,7 +1266,7 @@ async function boot(){
   try{
     await openDB(); await seedIfNeeded(); await loadAll(); await migrateBuiltinTemplateCorpus(); applyTheme(); await restoreSession();
     if(!state.practice) renderPage('today'); else renderPage('practice');
-    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=5', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
+    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=6', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
   }catch(err){
     console.error('Startup failed:', err);
     const reason = err?.name === 'SecurityError'
