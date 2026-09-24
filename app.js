@@ -15,9 +15,9 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 
 const DEFAULT_CORPUS = {
   templates: [
-    { id: 't1', category: 'templates', group: '核心结构', text: '以__为__，__（动词/效果）__', parts: ['以', '__', '为', '__', '，', '__'], enabled: true },
-    { id: 't2', category: 'templates', group: '核心结构', text: '坚持__，__（动词/效果）__', parts: ['坚持', '__', '，', '__'], enabled: true },
-    { id: 't3', category: 'templates', group: '核心结构', text: '__（动词）__，__（动词）__', parts: ['__', '，', '__'], enabled: true }
+    { id: 't1', category: 'templates', group: '核心结构', text: '以__为__，__（动词/效果）__', parts: ['以', '__', '为', '__', '，', '__'], slotDefaults: [true, true, false], enabled: true },
+    { id: 't2', category: 'templates', group: '核心结构', text: '坚持__，__（动词/效果）__', parts: ['坚持', '__', '，', '__'], slotDefaults: [true, false], enabled: true },
+    { id: 't3', category: 'templates', group: '核心结构', text: '__（动词）__，__（动词）__', parts: ['__', '，', '__'], slotDefaults: [true, true], enabled: true }
   ],
   metaphors: [
     ...['旗','旗帜','纲','纲领','魂','本','舵','灯塔','罗盘','北斗星','定盘星','压舱石'].map((text,i)=>({id:`m-root-${i}`,category:'metaphors',group:'根本',text})),
@@ -66,7 +66,10 @@ const state = {
   questions: [],
   practice: null,
   practiceTimer: null,
-  dragging: null
+  dragging: null,
+  activeSentence: 0,
+  activeZone: 0,
+  lastPlacedId: null
 };
 
 function uid(prefix='id') { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,9)}`; }
@@ -163,371 +166,646 @@ function applyTheme() {
 
 function corpus(category) { return state.corpus.filter(x=>x.category===category); }
 function pickTemplate() { return sample(corpus('templates').filter(x=>x.enabled!==false), 1)[0]; }
+function normalizeTemplate(template) {
+  const t = structuredClone(template || {});
+  if (!Array.isArray(t.parts) || !t.parts.length) {
+    const raw = String(t.text || '').split('__');
+    t.parts = [];
+    raw.forEach((part, i) => { t.parts.push(part); if (i < raw.length - 1) t.parts.push('__'); });
+  }
+  const slotCount = t.parts.filter(p => p === '__').length;
+  if (!Array.isArray(t.slotDefaults) || t.slotDefaults.length !== slotCount) {
+    t.slotDefaults = Array.from({length: slotCount}, (_, i) => {
+      // 兼容旧数据：逗号前的空默认“一格一词”，逗号后的空默认可放多个；
+      // 但第三套内置结构两个空都保留为单语块默认。
+      if (t.id === 't3') return true;
+      let seenComma = false;
+      let slotNo = 0;
+      for (const part of t.parts) {
+        if (part === '，' || part === ',') seenComma = true;
+        if (part === '__') {
+          if (slotNo === i) return !seenComma;
+          slotNo += 1;
+        }
+      }
+      return true;
+    });
+  }
+  return t;
+}
+
+function parseTemplateParts(text) {
+  const raw = String(text || '').split('__');
+  const parts = [];
+  raw.forEach((part, i) => { parts.push(part); if (i < raw.length - 1) parts.push('__'); });
+  return parts;
+}
+
+function topicGroupSample(allTopics, n = 3) {
+  const groups = [...new Set(allTopics.map(x => x.group || '未分类'))];
+  const eligible = groups.filter(g => allTopics.filter(x => (x.group || '未分类') === g).length >= n);
+  if (!eligible.length) return sample(allTopics, n);
+  const group = sample(eligible, 1)[0];
+  return sample(allTopics.filter(x => (x.group || '未分类') === group), n);
+}
+
 function makePool(samples, topics) {
-  const tokens = [];
-  const push = (kind, arr) => arr.forEach(x => tokens.push({id: uid(kind), kind, text: x.text}));
-  push('verb', samples.verbs);
-  push('metaphor', samples.metaphors);
-  push('effect', samples.effects);
-  push('topic', topics);
-  return shuffle(tokens);
+  const make = (kind, arr) => arr.map(x => ({id: uid(kind), kind, text: x.text}));
+  // 练习时不再把所有类别混成一坨；数据仍然随机，但按类别分栏。
+  return [
+    ...make('topic', topics),
+    ...make('verb', samples.verbs),
+    ...make('metaphor', samples.metaphors),
+    ...make('effect', samples.effects)
+  ];
 }
-function getSampleCounts(template) {
-  if (template?.id === 't1') return {verbs:6, metaphors:8, effects:8};
-  if (template?.id === 't2') return {verbs:8, metaphors:5, effects:8};
-  return {verbs:10, metaphors:4, effects:8};
+
+function getSampleCounts() {
+  // 保留“有干扰语块”的玩法，但控制数量，避免 60 秒被语块池本身拖死。
+  return {verbs: 6, metaphors: 6, effects: 6};
 }
+
 function createQuestion(prev = null, reroll = {}) {
-  const templates = corpus('templates').filter(x=>x.enabled!==false);
+  const templates = corpus('templates').filter(x => x.enabled !== false);
   if (!templates.length) throw new Error('没有可用句式，请在语料库中恢复或新增句式。');
-  const template = prev?.template || pickTemplate();
+  const template = normalizeTemplate(prev?.template || pickTemplate());
   const counts = getSampleCounts(template);
-  const allVerbs = corpus('verbs'); const allMetas = corpus('metaphors'); const allEffects = corpus('effects'); const allTopics = corpus('topics');
-  const topics = reroll.topics ? sample(allTopics,3) : (prev?.topics || sample(allTopics,3));
+  const allVerbs = corpus('verbs');
+  const allMetas = corpus('metaphors');
+  const allEffects = corpus('effects');
+  const allTopics = corpus('topics');
+  if (allTopics.length < 3) throw new Error('至少需要 3 个主题词。');
+
+  const topics = reroll.topics
+    ? topicGroupSample(allTopics, 3)
+    : (prev?.topics?.length === 3 ? prev.topics : topicGroupSample(allTopics, 3));
+
   const samples = {
     verbs: reroll.verbs ? sample(allVerbs, counts.verbs) : (prev?.samples?.verbs || sample(allVerbs, counts.verbs)),
     metaphors: reroll.metaphors ? sample(allMetas, counts.metaphors) : (prev?.samples?.metaphors || sample(allMetas, counts.metaphors)),
     effects: reroll.effects ? sample(allEffects, counts.effects) : (prev?.samples?.effects || sample(allEffects, counts.effects))
   };
+  const slotCount = template.parts.filter(p => p === '__').length;
   return {
     template,
     topics,
     samples,
     pool: makePool(samples, topics),
-    placed: Array.from({length: template.parts.filter(p=>p==='__').length + 1}, ()=>[]),
+    placed: Array.from({length: slotCount * 3}, () => []),
     startedAt: Date.now(),
-    common: []
+    common: [],
+    activeSentence: 0,
+    activeZone: defaultZoneIndex(template, Array.from({length: slotCount}, () => []))
   };
 }
 
-function requiredSlots(question) {
-  return question.template.parts.filter(p=>p==='__').length;
+function getSentenceSlotCount(q) {
+  return normalizeTemplate(q.template).parts.filter(p => p === '__').length;
 }
-function totalPlaced(q) { return q.placed.reduce((n,a)=>n+a.length,0); }
-function allSlotsFilled(q) { return q.placed.every(a => Array.isArray(a) && a.length > 0); }
-function totalSlots(q) { return requiredSlots(q); }
-function nextBlank(q) {
-  const n = totalSlots(q);
-  for (let i=0;i<n;i++) if (!q.placed[i]?.length) return i;
-  return null;
+
+function slotDefaultOne(q, localSlot) {
+  const t = normalizeTemplate(q.template);
+  return t.slotDefaults?.[localSlot] !== false;
 }
-function usedTokenIds(q) { return new Set(q.placed.flat().map(x=>x.id)); }
-function tokenFromPool(q,id) { return q.pool.find(x=>x.id===id); }
-function removeFromArray(arr,id) { return arr.filter(x=>x.id!==id); }
+
+function defaultZoneIndex(template, placedZones) {
+  const t = normalizeTemplate(template);
+  const slotCount = t.parts.filter(p => p === '__').length;
+  for (let i = 0; i < slotCount; i++) {
+    if (t.slotDefaults?.[i] && !(placedZones[i] || []).length) return i;
+  }
+  for (let i = 0; i < slotCount; i++) {
+    if (!(placedZones[i] || []).length) return i;
+  }
+  return Math.max(0, slotCount - 1);
+}
+
+function migratePracticeShape() {
+  const p = state.practice;
+  if (!p?.question) return;
+  p.question.template = normalizeTemplate(p.question.template);
+  const slotCount = getSentenceSlotCount(p.question);
+  const wanted = slotCount * 3;
+  if (!Array.isArray(p.question.placed) || p.question.placed.length !== wanted) {
+    p.question.placed = Array.from({length: wanted}, () => []);
+  }
+  if (!Array.isArray(p.question.common)) p.question.common = [];
+  if (!Array.isArray(p.question.pool)) p.question.pool = [];
+  p.activeSentence = Number.isInteger(p.activeSentence) ? Math.max(0, Math.min(2, p.activeSentence)) : 0;
+  p.activeZone = Number.isInteger(p.activeZone) ? Math.max(0, Math.min(slotCount - 1, p.activeZone)) : 0;
+}
+
+function sentenceRange(q, sentenceIndex) {
+  const slotCount = getSentenceSlotCount(q);
+  return {start: sentenceIndex * slotCount, end: sentenceIndex * slotCount + slotCount};
+}
+
+function sentenceFilled(q, sentenceIndex) {
+  const {start, end} = sentenceRange(q, sentenceIndex);
+  return q.placed.slice(start, end).every(arr => Array.isArray(arr) && arr.length > 0);
+}
+
+function allSentencesFilled(q) {
+  return [0,1,2].every(i => sentenceFilled(q, i));
+}
+
+function totalPlaced(q) { return q.placed.reduce((n, a) => n + a.length, 0); }
+function usedTokenIds(q) { return new Set(q.placed.flat().map(x => x.id)); }
+function tokenFromPool(q, id) { return q.pool.find(x => x.id === id); }
+
+function currentZoneIndex() {
+  const p = state.practice;
+  if (!p?.question) return null;
+  const slotCount = getSentenceSlotCount(p.question);
+  return p.activeSentence * slotCount + p.activeZone;
+}
+
+function setActiveZone(sentenceIndex, localSlot) {
+  const p = state.practice;
+  if (!p) return;
+  const slotCount = getSentenceSlotCount(p.question);
+  p.activeSentence = Math.max(0, Math.min(2, Number(sentenceIndex)));
+  p.activeZone = Math.max(0, Math.min(slotCount - 1, Number(localSlot)));
+  persistSession();
+  renderPractice({scrollToSentence: p.activeSentence});
+}
+
+function advanceToNextSentence() {
+  const p = state.practice;
+  if (!p) return;
+  if (p.activeSentence >= 2) return;
+  if (!sentenceFilled(p.question, p.activeSentence)) {
+    showToast('先完成这一句，再进入下一句。');
+    return;
+  }
+  p.activeSentence += 1;
+  p.activeZone = defaultZoneIndex(p.question.template, p.question.placed.slice(p.activeSentence * getSentenceSlotCount(p.question), (p.activeSentence + 1) * getSentenceSlotCount(p.question)));
+  persistSession();
+  renderPractice({scrollToSentence: p.activeSentence});
+}
 
 function buildPracticeHTML() {
   const p = state.practice;
   if (!p) {
-    return `<div class="page"><div class="hero-card card"><div class="page-title">开始操练</div><div class="page-subtitle">每题 60 秒。无正误判断，只练标题与分论点的句式肌肉。</div><div class="col" style="margin-top:12px"><div class="stat-grid"><div class="stat-card"><div class="stat-value">20</div><div class="stat-label">一局题数</div></div><div class="stat-card"><div class="stat-value">60s</div><div class="stat-label">每题限时</div></div><div class="stat-card"><div class="stat-value">3❤</div><div class="stat-label">一局生命</div></div><div class="stat-card"><div class="stat-value">∞</div><div class="stat-label">通用语块</div></div></div><button id="startPractice" class="btn primary btn-block">开始 20 题</button></div></div></div>`;
+    return `<div class="page start-page">
+      <section class="start-hero">
+        <div class="eyebrow">60 秒 × 20 题</div>
+        <h1>把“八股句式”练成肌肉记忆</h1>
+        <p>不判对错。你负责把三个主题词放进三个分论点，排到顺口为止。</p>
+        <button id="startPractice" class="btn primary btn-block btn-lg">开始一局</button>
+      </section>
+      <div class="mini-stats">
+        <div><b>20</b><span>题 / 局</span></div>
+        <div><b>60s</b><span>每题</span></div>
+        <div><b>3❤</b><span>生命</span></div>
+        <div><b>∞</b><span>通用语块</span></div>
+      </div>
+    </div>`;
   }
   const q = p.question;
-  const elapsed = Math.min(60, Math.floor((Date.now()-q.startedAt)/1000));
-  const remaining = Math.max(0,60-elapsed);
-  const percent = ((p.index + (remaining<60? (elapsed/60):0))/20)*100;
+  const elapsed = Math.min(60, Math.floor((Date.now() - q.startedAt) / 1000));
+  const remaining = Math.max(0, 60 - elapsed);
+  const percent = Math.min(100, ((p.index + elapsed / 60) / 20) * 100);
+  const topicGroup = q.topics[0]?.group || '本题主题';
   return `<div class="page practice-page">
-    <div class="practice-head card tight">
-      <div class="row row-between"><span class="question-count">第 ${p.index+1} / 20 题</span><span class="template-badge">${escapeHTML(q.template.id)} · ${escapeHTML(q.template.text)}</span></div>
-      <div class="timer-row"><div id="timer" class="timer ${remaining<=10?'danger':''}">${formatSeconds(remaining)}</div><div id="lifeRow" class="life-row" aria-label="生命值">${'❤'.repeat(p.hearts)}${'♡'.repeat(Math.max(0,3-p.hearts))}</div></div>
-      <div class="progress-track"><div class="progress-fill" style="width:${Math.max(0,Math.min(100,percent))}%"></div></div>
-      <div class="row row-between small"><span>连击：<strong>${p.combo}</strong></span><span>本局 XP：<strong>${p.roundXP}</strong></span></div>
-    </div>
+    <section class="practice-top">
+      <div class="practice-meta">
+        <div class="round-label">第 ${p.index + 1} / 20 题</div>
+        <div class="timer-wrap"><span id="timer" class="timer ${remaining <= 10 ? 'danger' : ''}">${formatSeconds(remaining)}</span><span id="lifeRow" class="life-row">${'♥'.repeat(p.hearts)}${'♡'.repeat(Math.max(0, 3 - p.hearts))}</span></div>
+      </div>
+      <div class="progress-track slim"><div class="progress-fill" style="width:${percent}%"></div></div>
+      <div class="practice-submeta"><span>🔥 ${p.combo} 连击</span><span>⚡ ${p.roundXP} XP</span><button id="rerollBtn" class="icon-btn" aria-label="重新出题">↻</button></div>
+    </section>
 
-    <div class="sentence-list">
-      ${q.template.parts.reduce((out,part,i)=>{
-        if(i===0) out.push({type:'static',text:'',slotIndex:-1});
-        return out;
-      }, []) ? renderSentenceBuilders(q) : ''}
-    </div>
+    <section class="topic-card">
+      <div class="section-kicker">本题主题 · ${escapeHTML(topicGroup)}</div>
+      <div class="topic-row">${q.topics.map(t => `<span class="topic-pill">${escapeHTML(t.text)}</span>`).join('')}</div>
+    </section>
 
-    <div class="pool card">
-      <div class="row row-between"><div><div class="section-title">语块池</div><div class="muted tiny">只包含本题抽中的 3 个主题词；点选语块填入空位。</div></div><span class="badge">${q.topics.map(t=>escapeHTML(t.text)).join(' · ')}</span></div>
-      <div id="poolGrid" class="pool-grid">${renderPool(q)}</div>
-      <div class="divider"></div>
-      <div class="section-title">通用语块 NPC</div>
-      <div class="muted tiny">临时语块不限量，只在当前题有效；可添加“的 / 和 / 更 / 彰显”等。</div>
-      <div class="common-box"><input id="commonInput" class="input" placeholder="输入自定义语块" maxlength="30"><button id="addCommon" class="btn primary">添加</button></div>
-    </div>
+    <section class="template-card">
+      <div class="template-kicker">固定句式</div>
+      <div class="template-text">${escapeHTML(q.template.text)}</div>
+    </section>
+
+    <section class="sentence-list">${[0,1,2].map(i => renderSentenceCard(q, i, p.activeSentence === i)).join('')}</section>
+
+    <button id="nextSentenceBtn" class="next-sentence ${p.activeSentence < 2 ? '' : 'last'}" ${p.activeSentence < 2 && !sentenceFilled(q, p.activeSentence) ? 'disabled' : ''}>
+      ${p.activeSentence < 2 ? `完成第 ${p.activeSentence + 1} 句，进入下一句 →` : '三句都完成了 ✓'}
+    </button>
+
+    <section class="pool-card">
+      <div class="pool-header"><div><div class="section-title">语块池</div><div class="muted tiny">先选当前句 · 再点语块。拖动已填语块可以换位置。</div></div></div>
+      ${renderPoolCategory(q, 'topic', '主题词', '本题固定 3 个', true)}
+      ${renderPoolCategory(q, 'verb', '动词', '随机语块', false)}
+      ${renderPoolCategory(q, 'metaphor', '比喻词', '随机语块', false)}
+      ${renderPoolCategory(q, 'effect', '效果', '随机语块', false)}
+      <button id="addCommon" class="common-add"><span>＋</span> 通用语块 <small>不限量</small></button>
+    </section>
 
     <div class="action-bar">
-      <button id="rerollBtn" class="btn ghost">重新出题</button>
-      <button id="completeBtn" class="btn primary" ${!allSlotsFilled(q)?'disabled':''}>完成本句</button>
-      <button id="abandonBtn" class="btn danger">放弃本题</button>
+      <button id="completeBtn" class="btn primary" ${allSentencesFilled(q) ? '' : 'disabled'}>完成本题</button>
+      <button id="abandonBtn" class="btn ghost">放弃</button>
     </div>
   </div>`;
 }
 
-function renderSentenceBuilders(q) {
-  const slots = q.template.parts.filter(p=>p==='__').length;
-  let slotNo = 0;
-  const content = q.template.parts.map(part=>{
-    if(part!=='__') return `<span class="static-text">${escapeHTML(part)}</span>`;
-    const idx = slotNo++;
-    const chips = (q.placed[idx]||[]).map(tok=>`<span class="sentence-chip" draggable="true" data-place-id="${tok.id}" data-slot="${idx}">${escapeHTML(tok.text)}</span>`).join('');
-    return `<div class="blank ${chips?'active':''}" data-slot="${idx}">${chips || `<span class="placeholder">点选语块</span>`}</div>`;
+function renderSentenceCard(q, sentenceIndex, active) {
+  const t = normalizeTemplate(q.template);
+  const slotCount = t.parts.filter(p => p === '__').length;
+  const content = t.parts.map((part, i) => {
+    if (part !== '__') return `<span class="static-text">${escapeHTML(part)}</span>`;
+    const localSlot = t.parts.slice(0, i).filter(x => x === '__').length;
+    const idx = sentenceIndex * slotCount + localSlot;
+    const chips = (q.placed[idx] || []).map(tok => renderPlacedChip(tok, idx)).join('');
+    const hint = t.slotDefaults?.[localSlot] ? '1 个语块' : '可放多个';
+    return `<div class="token-zone ${chips ? 'has-token' : ''} ${active && state.practice?.activeSentence === sentenceIndex && state.practice?.activeZone === localSlot ? 'selected' : ''}" data-slot="${idx}" data-sentence="${sentenceIndex}" data-local-slot="${localSlot}">
+      ${chips || `<span class="zone-placeholder">${hint}</span>`}
+    </div>`;
   }).join('');
-  return `<div class="sentence-card"><div class="sentence-label">分论点 1</div><div class="sentence-builder" data-sentence="0">${content}</div></div>
-  <div class="sentence-card"><div class="sentence-label">分论点 2</div><div class="sentence-builder" data-sentence="1">${content.replaceAll('data-slot="0"','data-slot="99"').replaceAll('data-slot="1"','data-slot="98"')}</div></div>
-  <div class="sentence-card"><div class="sentence-label">分论点 3</div><div class="sentence-builder" data-sentence="2">${content.replaceAll('data-slot="0"','data-slot="97"').replaceAll('data-slot="1"','data-slot="96"')}</div></div>`;
+  return `<article class="sentence-card ${active ? 'active' : ''}" id="sentence-${sentenceIndex}">
+    <button class="sentence-head" data-sentence-select="${sentenceIndex}">
+      <span class="sentence-number">${sentenceIndex + 1}</span><span>分论点 ${sentenceIndex + 1}</span><span class="sentence-status">${sentenceFilled(q, sentenceIndex) ? '✓ 已完成' : active ? '正在排' : '待填写'}</span>
+    </button>
+    <div class="sentence-builder" data-sentence="${sentenceIndex}">${content}</div>
+  </article>`;
 }
 
-/* 上面的模板展示需要 3 句话，每句话都用同一个句式。这里重做为独立 slot 数组：每题共 9 个槽，分别属于 3 个分论点。 */
-function getSentenceSlotCount(q) { return q.template.parts.filter(p=>p==='__').length; }
-function renderOneSentence(q, sentenceIndex) {
-  const slotCount = getSentenceSlotCount(q);
-  let slot = sentenceIndex*slotCount;
-  return q.template.parts.map(part=>{
-    if(part!=='__') return `<span class="static-text">${escapeHTML(part)}</span>`;
-    const idx = slot++;
-    const chips = (q.placed[idx]||[]).map(tok=>`<span class="sentence-chip" draggable="true" data-place-id="${tok.id}" data-slot="${idx}">${escapeHTML(tok.text)}</span>`).join('');
-    return `<div class="blank ${chips?'active':''}" data-slot="${idx}">${chips || `<span class="placeholder">点选语块</span>`}</div>`;
-  }).join('');
-}
-function renderSentenceBuildersFixed(q) {
-  return [0,1,2].map(i=>`<div class="sentence-card"><div class="sentence-label">分论点 ${i+1}</div><div class="sentence-builder" data-sentence="${i}">${renderOneSentence(q,i)}</div></div>`).join('');
+function renderPlacedChip(tok, slotIndex) {
+  const isCommon = tok.kind === 'common';
+  return `<button class="token-chip filled ${tok.kind} ${state.lastPlacedId === tok.id ? 'just-added' : ''}" draggable="true" data-place-id="${tok.id}" data-slot="${slotIndex}" title="${isCommon ? '点击编辑' : '点击退回语块池'}">${escapeHTML(tok.text)}${isCommon ? '<span class="edit-dot">✎</span>' : ''}</button>`;
 }
 
-function renderPool(q) {
+function renderPoolCategory(q, kind, title, sub, compact = false) {
   const used = usedTokenIds(q);
-  const all = q.pool.filter(x=>!used.has(x.id));
-  if (!all.length) return `<div class="empty small">语块已全部使用</div>`;
-  return all.map(tok=>`<button class="chip ${tok.kind}" data-pool-id="${tok.id}">${escapeHTML(tok.text)}</button>`).join('');
+  const items = q.pool.filter(x => x.kind === kind && !used.has(x.id));
+  return `<div class="pool-section ${kind} ${compact ? 'compact' : ''}">
+    <div class="pool-section-head"><strong>${title}</strong><span>${sub}</span></div>
+    <div class="pool-grid">${items.length ? items.map(tok => `<button class="pool-chip ${tok.kind}" data-pool-id="${tok.id}">${escapeHTML(tok.text)}</button>`).join('') : '<span class="pool-empty">已全部用掉</span>'}</div>
+  </div>`;
 }
 
-function renderPractice() {
-  // buildPracticeHTML 的 sentence-list 使用固定三句版本
-  const html = buildPracticeHTML().replace('${q.template.parts.reduce((out,part,i)=>{', '${q.template.parts.reduce((out,part,i)=>{');
-  $('#main').innerHTML = state.practice ? buildPracticeHTML().replace(/<div class="sentence-list">[\s\S]*?<\/div>\n\n    <div class="pool card">/, `<div class="sentence-list">${renderSentenceBuildersFixed(state.practice.question)}</div>\n\n    <div class="pool card">`) : buildPracticeHTML();
+function renderPractice(options = {}) {
+  migratePracticeShape();
+  $('#main').innerHTML = buildPracticeHTML();
   $('#topStats').hidden = !state.practice;
   updateTopStats();
   bindPractice();
+  if (options.scrollToSentence !== undefined) {
+    requestAnimationFrame(() => $('#sentence-' + options.scrollToSentence)?.scrollIntoView({behavior:'smooth', block:'center'}));
+  }
+  if (state.lastPlacedId) {
+    const last = document.querySelector(`[data-place-id="${CSS.escape(state.lastPlacedId)}"]`);
+    setTimeout(() => { last?.classList.remove('just-added'); if (state.lastPlacedId) state.lastPlacedId = null; }, 220);
+  }
 }
 
-function updateTopStats(){
-  const p=state.practice;
-  if(!p){ $('#topStats').hidden=true; return; }
+function updateTopStats() {
+  const p = state.practice;
+  if (!p) { $('#topStats').hidden = true; return; }
   $('#heartPill').textContent = `❤ ${p.hearts}`;
   $('#xpPill').textContent = `XP ${state.meta.xp}`;
   $('#comboPill').textContent = `🔥 ${p.combo}`;
 }
 
-function bindPractice(){
+function bindPractice() {
   $('#startPractice')?.addEventListener('click', startRound);
   $('#rerollBtn')?.addEventListener('click', openRerollModal);
   $('#completeBtn')?.addEventListener('click', completeQuestion);
   $('#abandonBtn')?.addEventListener('click', abandonQuestion);
+  $('#nextSentenceBtn')?.addEventListener('click', advanceToNextSentence);
   $('#addCommon')?.addEventListener('click', addCommonBlock);
-  $('#commonInput')?.addEventListener('keydown', e=>{ if(e.key==='Enter') addCommonBlock(); });
 
-  $$('.pool .chip').forEach(btn=>btn.addEventListener('click',()=>usePoolToken(btn.dataset.poolId)));
-  $$('.blank').forEach(b=>b.addEventListener('click',()=>{ $('.blank.active', b.parentElement)?.classList.remove('active'); b.classList.add('active'); state.practice.activeSlot = Number(b.dataset.slot); }));
-  $$('.sentence-chip').forEach(bindDragChip);
-  $$('.blank').forEach(bindDropZone);
+  $$('[data-pool-id]').forEach(btn => btn.addEventListener('click', () => usePoolToken(btn.dataset.poolId)));
+  $$('[data-sentence-select]').forEach(btn => btn.addEventListener('click', () => {
+    const idx = Number(btn.dataset.sentenceSelect);
+    const p = state.practice;
+    if (!p) return;
+    p.activeSentence = idx;
+    const slotCount = getSentenceSlotCount(p.question);
+    const localStart = idx * slotCount;
+    p.activeZone = defaultZoneIndex(p.question.template, p.question.placed.slice(localStart, localStart + slotCount));
+    persistSession();
+    renderPractice({scrollToSentence: idx});
+  }));
+  $$('.token-zone').forEach(zone => {
+    zone.addEventListener('click', e => {
+      if (e.target.closest('.token-chip')) return;
+      setActiveZone(Number(zone.dataset.sentence), Number(zone.dataset.localSlot));
+    });
+    bindDropZone(zone);
+  });
+  $$('.token-chip').forEach(bindDragChip);
 }
 
-function activeSlot(){
-  const p=state.practice; if(!p) return null;
-  if(Number.isInteger(p.activeSlot) && p.activeSlot < p.question.placed.length) return p.activeSlot;
-  return nextBlank(p.question);
-}
-function usePoolToken(id){
-  const p=state.practice; if(!p) return;
-  const tok = tokenFromPool(p.question,id); if(!tok) return;
-  let idx = activeSlot();
-  if(idx===null){ showToast('空位已经填满，可拖动调整顺序或点击已填语块取消。'); return; }
-  // 若点击的是一个非首空位之前，允许按当前激活位置放置。
-  p.question.placed[idx].push(tok);
-  p.activeSlot = nextBlank(p.question);
+function usePoolToken(id) {
+  const p = state.practice; if (!p) return;
+  const tok = tokenFromPool(p.question, id); if (!tok) return;
+  const zone = currentZoneIndex();
+  if (zone === null) return;
+  p.question.placed[zone].push(tok);
+  p.lastPlacedId = tok.id;
+  state.lastPlacedId = tok.id;
+  // 单语块默认：填满后自动把“当前句”的默认目标移到下一个；不跨句。
+  const localSlot = p.activeZone;
+  if (slotDefaultOne(p.question, localSlot) && p.question.placed[zone].length >= 1) {
+    const slotCount = getSentenceSlotCount(p.question);
+    const next = defaultZoneIndex(p.question.template, p.question.placed.slice(p.activeSentence * slotCount, (p.activeSentence + 1) * slotCount));
+    p.activeZone = next;
+  }
   persistSession();
   renderPractice();
 }
-function removePlacedToken(id){
-  const p=state.practice; if(!p) return;
-  for(let i=0;i<p.question.placed.length;i++){
-    const pos=p.question.placed[i].findIndex(x=>x.id===id);
-    if(pos>=0){ p.question.placed[i].splice(pos,1); p.activeSlot=i; break; }
-  }
-  persistSession(); renderPractice();
-}
-function addCommonBlock(){
-  const input=$('#commonInput'); if(!input) return;
-  const text=input.value.trim(); if(!text) return;
-  const tok={id:uid('common'),kind:'common',text};
-  const p=state.practice;
+
+function addCommonBlock() {
+  const p = state.practice; if (!p) return;
+  const zone = currentZoneIndex(); if (zone === null) return;
+  const tok = {id: uid('common'), kind:'common', text:'通用'};
   p.question.pool.push(tok);
   p.question.common.push(tok);
-  input.value='';
-  persistSession(); renderPractice();
+  p.question.placed[zone].push(tok);
+  p.lastPlacedId = tok.id;
+  state.lastPlacedId = tok.id;
+  persistSession();
+  renderPractice();
+  showToast('已添加绿色通用语块，点它即可编辑。');
 }
 
-function bindDragChip(chip){
-  chip.addEventListener('click',()=>{ if(!state.dragging?.moved) removePlacedToken(chip.dataset.placeId); });
-  chip.addEventListener('pointerdown', e=>startPointerDrag(e,chip));
-  chip.addEventListener('dragstart', e=>{ e.dataTransfer.setData('text/plain', chip.dataset.placeId); });
+function editCommonToken(id) {
+  const p = state.practice; if (!p) return;
+  const tok = p.question.pool.find(x => x.id === id);
+  if (!tok || tok.kind !== 'common') return;
+  openModal(`<div class="modal"><div class="modal-handle"></div><h3>编辑通用语块</h3><p class="page-subtitle">它只存在于这一题。可以改字，也可以删除。</p><input id="commonEditInput" class="input" maxlength="30" value="${escapeHTML(tok.text)}" autofocus><div class="modal-actions three"><button class="btn danger" id="deleteCommon">删除</button><button class="btn ghost" data-close-modal>取消</button><button class="btn primary" id="saveCommon">保存</button></div></div>`);
+  $('#saveCommon')?.addEventListener('click', () => {
+    const text = $('#commonEditInput')?.value.trim();
+    if (!text) { showToast('通用语块不能为空。'); return; }
+    tok.text = text;
+    const placed = p.question.placed.flat().find(x => x.id === id);
+    if (placed) placed.text = text;
+    closeModal();
+    persistSession();
+    renderPractice();
+  });
+  $('#deleteCommon')?.addEventListener('click', () => {
+    p.question.pool = p.question.pool.filter(x => x.id !== id);
+    p.question.common = p.question.common.filter(x => x.id !== id);
+    p.question.placed = p.question.placed.map(arr => arr.filter(x => x.id !== id));
+    closeModal();
+    persistSession();
+    renderPractice();
+  });
 }
-function bindDropZone(zone){
-  zone.addEventListener('dragover', e=>e.preventDefault());
-  zone.addEventListener('drop', e=>{ e.preventDefault(); const id=e.dataTransfer.getData('text/plain'); if(id) reorderPlaced(id, Number(zone.dataset.slot)); });
+
+function bindDragChip(chip) {
+  chip.addEventListener('click', () => {
+    if (chip.dataset.pointerHandled === '1') { chip.dataset.pointerHandled = '0'; return; }
+    if (chip.dataset.dragged === '1') { chip.dataset.dragged = '0'; return; }
+    const id = chip.dataset.placeId;
+    const p = state.practice;
+    const tok = p?.question.pool.find(x => x.id === id);
+    if (tok?.kind === 'common') editCommonToken(id);
+    else removePlacedToken(id);
+  });
+  chip.addEventListener('pointerdown', e => startPointerDrag(e, chip));
+  chip.addEventListener('dragstart', e => {
+    chip.dataset.dragged = '1';
+    e.dataTransfer.setData('text/plain', chip.dataset.placeId);
+  });
 }
-function startPointerDrag(e,chip){
-  if(e.pointerType==='mouse' && e.button!==0) return;
-  const id=chip.dataset.placeId;
-  let moved=false, timer=null, active=false;
-  const startX=e.clientX,startY=e.clientY;
-  const cleanup=()=>{
-    clearTimeout(timer); window.removeEventListener('pointermove',move); window.removeEventListener('pointerup',up); state.dragging=null; chip.classList.remove('dragging');
+
+function bindDropZone(zone) {
+  zone.addEventListener('dragover', e => e.preventDefault());
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    if (!id) return;
+    const index = insertionIndexFromPoint(zone, e.clientX, e.clientY, id);
+    reorderPlaced(id, Number(zone.dataset.slot), index);
+  });
+}
+
+function insertionIndexFromPoint(zone, x, y, movingId) {
+  const chips = $$('.token-chip', zone).filter(el => el.dataset.placeId !== movingId);
+  if (!chips.length) return 0;
+  for (let i = 0; i < chips.length; i++) {
+    const r = chips[i].getBoundingClientRect();
+    const horizontal = x < r.left + r.width / 2;
+    const verticalBefore = y < r.top + r.height / 2;
+    if (verticalBefore || horizontal) return i;
+  }
+  return chips.length;
+}
+
+function startPointerDrag(e, chip) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  const id = chip.dataset.placeId;
+  let moved = false, active = false, timer = null;
+  const startX = e.clientX, startY = e.clientY;
+  const cleanup = () => {
+    clearTimeout(timer);
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    $$('.token-zone.drag-target').forEach(z => z.classList.remove('drag-target'));
+    chip.classList.remove('dragging');
+    state.dragging = null;
   };
-  const move=(ev)=>{
-    if(Math.hypot(ev.clientX-startX,ev.clientY-startY)>8) moved=true;
-    if(!active) return;
+  const move = ev => {
+    if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8) moved = true;
+    if (!active) return;
     ev.preventDefault();
-    const target=document.elementFromPoint(ev.clientX,ev.clientY)?.closest('.blank');
-    if(target) target.classList.add('active');
+    const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.token-zone');
+    $$('.token-zone.drag-target').forEach(z => z.classList.remove('drag-target'));
+    if (target) target.classList.add('drag-target');
   };
-  const up=(ev)=>{
-    if(active){ const target=document.elementFromPoint(ev.clientX,ev.clientY)?.closest('.blank'); if(target) reorderPlaced(id,Number(target.dataset.slot)); }
-    else if(!moved) removePlacedToken(id);
+  const up = ev => {
+    if (active) {
+      const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.token-zone');
+      if (target) {
+        const index = insertionIndexFromPoint(target, ev.clientX, ev.clientY, id);
+        chip.dataset.dragged = '1';
+        reorderPlaced(id, Number(target.dataset.slot), index);
+      }
+    } else if (!moved) {
+      chip.dataset.pointerHandled = '1';
+      chip.dataset.dragged = '0';
+      const p = state.practice;
+      const tok = p?.question.pool.find(x => x.id === id);
+      if (tok?.kind === 'common') editCommonToken(id); else removePlacedToken(id);
+    }
     cleanup();
   };
-  timer=setTimeout(()=>{active=true; state.dragging={moved:false}; chip.classList.add('dragging');},260);
-  window.addEventListener('pointermove',move,{passive:false}); window.addEventListener('pointerup',up,{once:false});
-}
-function reorderPlaced(id,targetSlot){
-  const p=state.practice; if(!p) return;
-  let token=null, from=-1, pos=-1;
-  for(let i=0;i<p.question.placed.length;i++){ const ix=p.question.placed[i].findIndex(x=>x.id===id); if(ix>=0){token=p.question.placed[i][ix]; from=i; pos=ix; break;} }
-  if(!token) return;
-  p.question.placed[from].splice(pos,1);
-  targetSlot=Math.max(0,Math.min(targetSlot,p.question.placed.length-1));
-  p.question.placed[targetSlot].push(token);
-  p.activeSlot=targetSlot;
-  persistSession(); renderPractice();
+  timer = setTimeout(() => {
+    active = true;
+    state.dragging = {id, moved:false};
+    chip.classList.add('dragging');
+  }, 260);
+  window.addEventListener('pointermove', move, {passive:false});
+  window.addEventListener('pointerup', up, {once:true});
 }
 
-function startRound({makeupTarget=null}={}){
-  if(corpus('topics').length<3 || corpus('verbs').length===0 || corpus('effects').length===0 || corpus('metaphors').length===0 || corpus('templates').length===0){
+function removePlacedToken(id) {
+  const p = state.practice; if (!p) return;
+  for (let i = 0; i < p.question.placed.length; i++) {
+    const pos = p.question.placed[i].findIndex(x => x.id === id);
+    if (pos >= 0) {
+      p.question.placed[i].splice(pos, 1);
+      const slotCount = getSentenceSlotCount(p.question);
+      p.activeSentence = Math.floor(i / slotCount);
+      p.activeZone = i % slotCount;
+      break;
+    }
+  }
+  persistSession();
+  renderPractice({scrollToSentence: p.activeSentence});
+}
+
+function reorderPlaced(id, targetSlot, targetIndex = 0) {
+  const p = state.practice; if (!p) return;
+  let token = null, fromSlot = -1, fromIndex = -1;
+  for (let i = 0; i < p.question.placed.length; i++) {
+    const ix = p.question.placed[i].findIndex(x => x.id === id);
+    if (ix >= 0) { token = p.question.placed[i][ix]; fromSlot = i; fromIndex = ix; break; }
+  }
+  if (!token) return;
+  p.question.placed[fromSlot].splice(fromIndex, 1);
+  if (fromSlot === targetSlot && fromIndex < targetIndex) targetIndex -= 1;
+  targetIndex = Math.max(0, Math.min(targetIndex, p.question.placed[targetSlot].length));
+  p.question.placed[targetSlot].splice(targetIndex, 0, token);
+  const slotCount = getSentenceSlotCount(p.question);
+  p.activeSentence = Math.floor(targetSlot / slotCount);
+  p.activeZone = targetSlot % slotCount;
+  persistSession();
+  renderPractice({scrollToSentence: p.activeSentence});
+}
+
+function startRound({makeupTarget = null} = {}) {
+  if (corpus('topics').length < 3 || corpus('verbs').length === 0 || corpus('effects').length === 0 || corpus('metaphors').length === 0 || corpus('templates').length === 0) {
     showToast('语料库不完整：至少需要 3 个主题词，以及句式、动词、比喻、效果各 1 个。'); return;
   }
-  state.practice={roundId:uid('round'),index:0,hearts:3,combo:0,roundXP:0,startedRoundAt:Date.now(),makeupTarget,answers:[],question:createQuestion(),activeSlot:0};
+  state.practice = {roundId: uid('round'), index:0, hearts:3, combo:0, roundXP:0, startedRoundAt:Date.now(), makeupTarget, answers:[], question:createQuestion(), activeSentence:0, activeZone:0};
   persistSession(); renderPractice(); startTimer();
 }
-function persistSession(){
-  if(!state.practice){ state.meta.session=null; saveMeta(); return; }
-  state.meta.session=structuredClone(state.practice); saveMeta();
-}
-async function restoreSession(){
-  if(!state.meta.session) return;
-  state.practice=state.meta.session;
-  // 防止序列化后出现旧题计时异常；startedAt 保持真实持续计时
-  const elapsed=(Date.now()-state.practice.question.startedAt)/1000;
-  if(elapsed>=60){ await handleTimeout(true); }
-  else { renderPractice(); startTimer(); }
-}
-function startTimer(){
-  clearInterval(state.practiceTimer);
-  state.practiceTimer=setInterval(()=>{
-    if(!state.practice){ clearInterval(state.practiceTimer); return; }
-    const q=state.practice.question; const remaining=Math.max(0,60-Math.floor((Date.now()-q.startedAt)/1000));
-    const timer=$('#timer'); if(timer){timer.textContent=formatSeconds(remaining); timer.classList.toggle('danger',remaining<=10);}
-    if(remaining<=0) handleTimeout();
-  },250);
+
+function persistSession() {
+  if (!state.practice) { state.meta.session = null; saveMeta(); return; }
+  state.meta.session = structuredClone(state.practice);
+  saveMeta();
 }
 
-async function completeQuestion(){
-  const p=state.practice; if(!p) return;
-  if(totalPlaced(p.question)!==totalSlots(p.question)){ showToast('先把三个分论点的空位填满。'); return; }
-  const elapsed=Math.min(60,Math.floor((Date.now()-p.question.startedAt)/1000));
-  const remaining=Math.max(0,60-elapsed);
-  const speedBonus=Math.floor(remaining/10)*5;
-  const baseXP=20; const gained=baseXP+speedBonus;
-  if(remaining>0) p.combo+=1; else p.combo=0;
-  p.roundXP+=gained; state.meta.xp+=gained;
-  const record={
-    id:uid('q'), date:todayKey(), ts:Date.now(), roundId:p.roundId, questionIndex:p.index+1,
-    status:'completed', elapsed, xp:gained, combo:p.combo,
-    template:p.question.template, topics:p.question.topics, sentences:buildPlainSentences(p.question)
+async function restoreSession() {
+  if (!state.meta.session) return;
+  state.practice = state.meta.session;
+  migratePracticeShape();
+  const elapsed = (Date.now() - state.practice.question.startedAt) / 1000;
+  if (elapsed >= 60) await handleTimeout(true);
+  else { renderPractice(); startTimer(); }
+}
+
+function startTimer() {
+  clearInterval(state.practiceTimer);
+  state.practiceTimer = setInterval(() => {
+    if (!state.practice) { clearInterval(state.practiceTimer); return; }
+    const q = state.practice.question;
+    const remaining = Math.max(0, 60 - Math.floor((Date.now() - q.startedAt) / 1000));
+    const timer = $('#timer');
+    if (timer) { timer.textContent = formatSeconds(remaining); timer.classList.toggle('danger', remaining <= 10); }
+    if (remaining <= 0) handleTimeout();
+  }, 250);
+}
+
+async function completeQuestion() {
+  const p = state.practice; if (!p) return;
+  if (!allSentencesFilled(p.question)) { showToast('三句都要自己排完，再完成本题。'); return; }
+  const elapsed = Math.min(60, Math.floor((Date.now() - p.question.startedAt) / 1000));
+  const remaining = Math.max(0, 60 - elapsed);
+  const speedBonus = Math.floor(remaining / 10) * 5;
+  const baseXP = 20; const gained = baseXP + speedBonus;
+  if (remaining > 0) p.combo += 1; else p.combo = 0;
+  p.roundXP += gained; state.meta.xp += gained;
+  const record = {
+    id: uid('q'), date: todayKey(), ts: Date.now(), roundId: p.roundId, questionIndex: p.index + 1,
+    status: 'completed', elapsed, xp: gained, combo: p.combo,
+    template: normalizeTemplate(p.question.template), topics: p.question.topics, sentences: buildPlainSentences(p.question)
   };
-  state.questions.push(record); await idbPut(STORE_QUESTIONS,record);
+  state.questions.push(record); await idbPut(STORE_QUESTIONS, record);
   p.answers.push(record);
-  if(p.index===19){ await finishRound(); return; }
-  p.index+=1; p.question=createQuestion(); p.activeSlot=0;
+  if (p.index === 19) { await finishRound(); return; }
+  p.index += 1; p.question = createQuestion(); p.activeSentence = 0; p.activeZone = 0;
   await saveMeta(); persistSession(); renderPractice(); startTimer();
 }
-function buildPlainSentences(q){
-  const slotCount=getSentenceSlotCount(q);
-  return [0,1,2].map(i=>{
-    let s=''; let slot=i*slotCount;
-    q.template.parts.forEach(part=>{ if(part==='__') s += (q.placed[slot++]||[]).map(t=>t.text).join(''); else s += part; });
+
+function buildPlainSentences(q) {
+  const t = normalizeTemplate(q.template);
+  const slotCount = t.parts.filter(p => p === '__').length;
+  return [0,1,2].map(i => {
+    let s = ''; let localSlot = 0;
+    t.parts.forEach(part => {
+      if (part === '__') {
+        const global = i * slotCount + localSlot++;
+        s += (q.placed[global] || []).map(tk => tk.text).join('');
+      } else s += part;
+    });
     return s;
   });
 }
 
-async function handleTimeout(restoring=false){
-  const p=state.practice; if(!p) return;
+async function handleTimeout(restoring = false) {
+  const p = state.practice; if (!p) return;
   clearInterval(state.practiceTimer);
-  const q=p.question;
-  const elapsed=60;
-  const record={id:uid('q'),date:todayKey(),ts:Date.now(),roundId:p.roundId,questionIndex:p.index+1,status:'timeout',elapsed,xp:0,combo:0,template:q.template,topics:q.topics,sentences:buildPlainSentences(q)};
-  p.answers.push(record); state.questions.push(record); await idbPut(STORE_QUESTIONS,record);
-  p.combo=0; p.hearts-=1;
-  if(p.hearts<=0){ state.practice=null; state.meta.session=null; await saveMeta(); renderPractice(); showGameOver(); return; }
-  p.index=Math.min(19,p.index+1); p.question=createQuestion(); p.activeSlot=0; persistSession(); renderPractice(); startTimer();
-  if(!restoring) showToast(`超时：生命 -1，连击清零，还剩 ${p.hearts} 颗心。`);
+  const q = p.question;
+  const record = {id:uid('q'), date:todayKey(), ts:Date.now(), roundId:p.roundId, questionIndex:p.index+1, status:'timeout', elapsed:60, xp:0, combo:0, template:normalizeTemplate(q.template), topics:q.topics, sentences:buildPlainSentences(q)};
+  p.answers.push(record); state.questions.push(record); await idbPut(STORE_QUESTIONS, record);
+  p.combo = 0; p.hearts -= 1;
+  if (p.hearts <= 0) { state.practice=null; state.meta.session=null; await saveMeta(); renderPractice(); showGameOver(); return; }
+  p.index = Math.min(19, p.index + 1); p.question = createQuestion(); p.activeSentence = 0; p.activeZone = 0; persistSession(); renderPractice(); startTimer();
+  if (!restoring) showToast(`超时：生命 -1，连击清零，还剩 ${p.hearts} 颗心。`);
 }
 
-async function abandonQuestion(){
-  const p=state.practice; if(!p) return;
-  const yes=confirm('确定放弃本题吗？连击会清零并进入下一题。');
-  if(!yes) return;
+async function abandonQuestion() {
+  const p = state.practice; if (!p) return;
+  if (!confirm('确定放弃本题吗？连击会清零并进入下一题。')) return;
   clearInterval(state.practiceTimer);
-  const elapsed=Math.min(60,Math.floor((Date.now()-p.question.startedAt)/1000));
-  const q=p.question;
-  const record={id:uid('q'),date:todayKey(),ts:Date.now(),roundId:p.roundId,questionIndex:p.index+1,status:'abandoned',elapsed,xp:0,combo:0,template:q.template,topics:q.topics,sentences:buildPlainSentences(q)};
-  p.answers.push(record); state.questions.push(record); await idbPut(STORE_QUESTIONS,record);
-  p.combo=0;
-  if(p.index===19){ p.index=0; p.question=createQuestion(); } else { p.index+=1; p.question=createQuestion(); }
-  p.activeSlot=0; persistSession(); renderPractice(); startTimer(); showToast('本题已放弃，连击清零。');
+  const elapsed = Math.min(60, Math.floor((Date.now() - p.question.startedAt) / 1000));
+  const q = p.question;
+  const record = {id:uid('q'), date:todayKey(), ts:Date.now(), roundId:p.roundId, questionIndex:p.index+1, status:'abandoned', elapsed, xp:0, combo:0, template:normalizeTemplate(q.template), topics:q.topics, sentences:buildPlainSentences(q)};
+  p.answers.push(record); state.questions.push(record); await idbPut(STORE_QUESTIONS, record);
+  p.combo = 0;
+  if (p.index === 19) p.index = 0; else p.index += 1;
+  p.question = createQuestion(); p.activeSentence = 0; p.activeZone = 0; persistSession(); renderPractice(); startTimer(); showToast('本题已放弃，连击清零。');
 }
 
-async function finishRound(){
+async function finishRound() {
   clearInterval(state.practiceTimer);
-  const p=state.practice;
-  const actualTarget=p.makeupTarget || todayKey();
-  const existing=await idbGet(STORE_DAILY,actualTarget);
-  const dailyRecord={
-    date:actualTarget,
-    checkIn:true,
-    completedAt:Date.now(),
-    actualPracticeDate:todayKey(),
-    answers:p.answers,
-    xp:p.roundXP,
-    roundId:p.roundId
-  };
-  await idbPut(STORE_DAILY,dailyRecord);
-  state.daily=state.daily.filter(d=>d.date!==actualTarget); state.daily.push(dailyRecord);
-  state.practice=null; state.meta.session=null; await saveMeta();
+  const p = state.practice;
+  const actualTarget = p.makeupTarget || todayKey();
+  const dailyRecord = {date:actualTarget, checkIn:true, completedAt:Date.now(), actualPracticeDate:todayKey(), answers:p.answers, xp:p.roundXP, roundId:p.roundId};
+  await idbPut(STORE_DAILY, dailyRecord);
+  state.daily = state.daily.filter(d => d.date !== actualTarget); state.daily.push(dailyRecord);
+  state.practice = null; state.meta.session = null; await saveMeta();
   renderPractice(); renderPage('today');
   openResultModal(p.roundXP, p.answers, actualTarget, Boolean(p.makeupTarget));
 }
 
-function showGameOver(){
-  openModal(`<div class="modal"><h3>生命耗尽</h3><p class="page-subtitle">这一局从头开始。已有答题记录会保存在本地。</p><div class="stat-grid"><div class="stat-card"><div class="stat-value">${state.meta.xp}</div><div class="stat-label">累计 XP</div></div><div class="stat-card"><div class="stat-value">${rankForXP(state.meta.xp).name}</div><div class="stat-label">当前段位</div></div></div><div class="modal-actions"><button class="btn ghost" data-close-modal>回到练习</button><button class="btn primary" id="restartRound">重新开始</button></div></div>`);
-  $('#restartRound')?.addEventListener('click',()=>{closeModal();startRound();});
+function showGameOver() {
+  openModal(`<div class="modal"><div class="modal-handle"></div><h3>生命用完了</h3><p class="page-subtitle">这一局从头开始。已经写过的内容会留在本地记录里。</p><div class="stat-grid"><div class="stat-card"><div class="stat-value">${state.meta.xp}</div><div class="stat-label">累计 XP</div></div><div class="stat-card"><div class="stat-value">${rankForXP(state.meta.xp).name}</div><div class="stat-label">当前段位</div></div></div><div class="modal-actions"><button class="btn ghost" data-close-modal>回到练习</button><button class="btn primary" id="restartRound">重新开始</button></div></div>`);
+  $('#restartRound')?.addEventListener('click', () => {closeModal(); startRound();});
 }
 
-function openResultModal(xp,answers,date,isMakeup){
-  const completed=answers.filter(a=>a.status==='completed').length;
-  const avg=answers.length?Math.round(answers.reduce((s,a)=>s+a.elapsed,0)/answers.length):0;
-  openModal(`<div class="modal"><h3>${isMakeup?'补签完成':'今日打卡完成'} 🎉</h3><p class="page-subtitle">${date} · ${isMakeup?'额外练习 1 局，已补签':'已完成 20 题并自动打卡'}</p><div class="stat-grid"><div class="stat-card"><div class="stat-value">+${xp}</div><div class="stat-label">本局 XP</div></div><div class="stat-card"><div class="stat-value">${completed}</div><div class="stat-label">完成题数</div></div><div class="stat-card"><div class="stat-value">${avg}s</div><div class="stat-label">平均单题</div></div><div class="stat-card"><div class="stat-value">${rankForXP(state.meta.xp).name}</div><div class="stat-label">当前段位</div></div></div><div class="modal-actions"><button class="btn primary" data-close-modal>查看今日</button><button class="btn ghost" id="goStats">去统计</button></div></div>`);
-  $('#goStats')?.addEventListener('click',()=>{closeModal();renderPage('stats');});
+function openResultModal(xp, answers, date, isMakeup) {
+  const completed = answers.filter(a => a.status === 'completed').length;
+  const avg = answers.length ? Math.round(answers.reduce((s,a) => s+a.elapsed, 0) / answers.length) : 0;
+  openModal(`<div class="modal"><div class="modal-handle"></div><h3>${isMakeup ? '补签完成' : '今日打卡完成'} 🎉</h3><p class="page-subtitle">${date} · ${isMakeup ? '额外一局已完成' : '20 题完成，自动打卡'}</p><div class="stat-grid"><div class="stat-card"><div class="stat-value">+${xp}</div><div class="stat-label">本局 XP</div></div><div class="stat-card"><div class="stat-value">${completed}</div><div class="stat-label">完成题数</div></div><div class="stat-card"><div class="stat-value">${avg}s</div><div class="stat-label">平均单题</div></div><div class="stat-card"><div class="stat-value">${rankForXP(state.meta.xp).name}</div><div class="stat-label">当前段位</div></div></div><div class="modal-actions"><button class="btn primary" data-close-modal>查看今日</button><button class="btn ghost" id="goStats">去统计</button></div></div>`);
+  $('#goStats')?.addEventListener('click', () => {closeModal(); renderPage('stats');});
 }
 
-function openRerollModal(){
-  openModal(`<div class="modal"><h3>重新出题</h3><p class="page-subtitle">默认全部重新抽取。未勾选的模块沿用当前题。</p>${[['topics','主题词'],['verbs','动词库'],['metaphors','比喻词库'],['effects','效果库']].map(([k,l])=>`<label class="check-row"><span>${l}</span><input type="checkbox" data-reroll="${k}" checked></label>`).join('')}<div class="modal-actions"><button class="btn ghost" data-close-modal>取消</button><button class="btn primary" id="confirmReroll">确认，计时重置</button></div></div>`);
-  $('#confirmReroll')?.addEventListener('click',async()=>{
-    const keys=$$('[data-reroll]', $('#modalRoot')).filter(x=>x.checked).map(x=>x.dataset.reroll);
-    const reroll={}; keys.forEach(k=>reroll[k]=true);
-    const p=state.practice; p.question=createQuestion(p.question,reroll); p.activeSlot=0;
-    closeModal(); persistSession(); renderPractice(); startTimer(); showToast('已重新出题，计时重置为 60 秒。');
+function openRerollModal() {
+  openModal(`<div class="modal"><div class="modal-handle"></div><h3>重新出题</h3><p class="page-subtitle">勾选要换的部分；主题词换了以后会重新按同一领域抽 3 个。</p>${[['topics','主题词'],['verbs','动词'],['metaphors','比喻词'],['effects','效果']].map(([k,l])=>`<label class="check-row"><span>${l}</span><input type="checkbox" data-reroll="${k}" checked></label>`).join('')}<div class="reroll-note">通用语块属于当前题临时内容，重新出题会一起清空。</div><div class="modal-actions"><button class="btn ghost" data-close-modal>取消</button><button class="btn primary" id="confirmReroll">重新抽取 · 60s</button></div></div>`);
+  $('#confirmReroll')?.addEventListener('click', () => {
+    const keys = $$('[data-reroll]', $('#modalRoot')).filter(x => x.checked).map(x => x.dataset.reroll);
+    const reroll = {}; keys.forEach(k => reroll[k] = true);
+    const p = state.practice;
+    p.question = createQuestion(p.question, reroll);
+    p.activeSentence = 0; p.activeZone = 0;
+    closeModal(); persistSession(); renderPractice(); startTimer(); showToast('已重新出题，60 秒重新计时。');
   });
 }
 
@@ -583,30 +861,67 @@ function openMakeupModal(){
   $('#confirmMakeup')?.addEventListener('click',()=>{ const target=$('[name="makeup"]:checked')?.value; if(!target) return; closeModal(); startRound({makeupTarget:target}); });
 }
 
-function renderCorpus(){
-  const items=corpus(state.corpusTab); const groups=[...new Set(items.map(x=>x.group||'未分类'))];
-  $('#main').innerHTML=`<div class="page"><div class="hero-card card"><div class="row row-between"><div><div class="page-title">语料库</div><div class="page-subtitle">用户新增会立即参与下一题抽取。</div></div><button class="btn primary sm" id="addCorpus">＋ 新增</button></div></div><div class="tabs">${Object.entries(CATEGORY_LABELS).map(([k,v])=>`<button class="tab ${state.corpusTab===k?'active':''}" data-corpus-tab="${k}">${v}</button>`).join('')}</div><div class="card tight"><div class="row row-between"><span class="muted small">${CATEGORY_LABELS[state.corpusTab]} · ${items.length} 条</span><div class="row"><button class="btn sm ghost" id="resetCategory">重置本类</button><button class="btn sm danger" id="clearCategory">清空本类</button></div></div></div><div class="corpus-list">${groups.map(g=>`<div class="card tight"><div class="section-title">${escapeHTML(g)}</div><div class="corpus-list" style="margin-top:9px">${items.filter(x=>(x.group||'未分类')===g).map(x=>`<div class="corpus-item"><div class="corpus-text">${escapeHTML(x.text)}</div><div class="row row-between"><span class="corpus-meta">${escapeHTML(x.id)}</span><div class="row"><button class="btn sm ghost" data-edit-id="${x.id}">编辑</button><button class="btn sm danger" data-delete-id="${x.id}">删除</button></div></div></div>`).join('')}</div></div>`).join('') || '<div class="card empty">本类为空。可以新增，也可以重置为内置数据。</div>'}</div></div>`;
-  $$('[data-corpus-tab]').forEach(b=>b.addEventListener('click',()=>{state.corpusTab=b.dataset.corpusTab;renderCorpus();}));
-  $('#addCorpus').addEventListener('click',()=>openCorpusEditor());
-  $$('[data-edit-id]').forEach(b=>b.addEventListener('click',()=>openCorpusEditor(state.corpus.find(x=>x.id===b.dataset.editId))));
-  $$('[data-delete-id]').forEach(b=>b.addEventListener('click',async()=>{ if(!confirm('删除这条语料？'))return; await idbDelete(STORE_CORPUS,b.dataset.deleteId); state.corpus=state.corpus.filter(x=>x.id!==b.dataset.deleteId);renderCorpus();showToast('已删除。'); }));
-  $('#resetCategory').addEventListener('click',resetCurrentCategory);
-  $('#clearCategory').addEventListener('click',clearCurrentCategory);
+function templateSlotEditorHTML(template, text) {
+  const parts = parseTemplateParts(text);
+  const count = parts.filter(x => x === '__').length;
+  if (!count) return '<div class="slot-editor-empty">加入“__”后，这里会出现每个空的默认规则。</div>';
+  const current = Array.isArray(template?.slotDefaults) ? template.slotDefaults : Array.from({length: count}, () => true);
+  return `<div class="slot-rule-list">${Array.from({length: count}, (_, i) => `<label class="slot-rule"><span><b>空 ${i + 1}</b><small>默认${current[i] !== false ? ' 1 个语块' : '可放多个语块'}</small></span><input type="checkbox" data-slot-default="${i}" ${current[i] !== false ? 'checked' : ''}></label>`).join('')}</div>`;
 }
-function openCorpusEditor(item=null){
-  const isTemplate=state.corpusTab==='templates';
-  openModal(`<div class="modal"><h3>${item?'编辑':'新增'}${CATEGORY_LABELS[state.corpusTab]}</h3><div class="col" style="margin-top:12px"><label class="small muted">分组</label><input id="corpusGroup" class="input" value="${escapeHTML(item?.group||'自定义')}"><label class="small muted">文本</label><textarea id="corpusText" class="textarea" ${isTemplate?'placeholder="例如：坚持__，__（动词/效果）__"':''}>${escapeHTML(item?.text||'')}</textarea>${isTemplate?'<div class="muted tiny">句式练习按下划线“__”识别空位。建议保持与内置三种结构相同；用户新增句式也可以使用任意数量“__”。</div>':''}<label class="small muted">启用</label><div class="row"><div id="corpusEnabled" class="switch ${item?.enabled!==false?'on':''}"></div><span class="small muted">练习时参与抽取</span></div></div><div class="modal-actions"><button class="btn ghost" data-close-modal>取消</button><button class="btn primary" id="saveCorpus">保存</button></div></div>`);
-  $('#saveCorpus').addEventListener('click',async()=>{
-    const text=$('#corpusText').value.trim(); const group=$('#corpusGroup').value.trim()||'自定义'; if(!text){showToast('请输入文本。');return;}
-    const record={id:item?.id||uid(state.corpusTab.slice(0,2)),category:state.corpusTab,group,text,enabled:$('#corpusEnabled').classList.contains('on')};
-    if(state.corpusTab==='templates'){
-      const raw=text.split('__'); record.parts=[]; raw.forEach((part,i)=>{ record.parts.push(part); if(i<raw.length-1) record.parts.push('__'); });
-      if(!text.includes('__')){ showToast('句式至少要包含一个“__”空位。'); return; }
+
+function renderCorpus() {
+  const items = corpus(state.corpusTab);
+  const groups = [...new Set(items.map(x => x.group || '未分类'))];
+  $('#main').innerHTML = `<div class="page corpus-page">
+    <section class="page-head"><div><div class="eyebrow">管理</div><h1>语料库</h1></div><button class="btn primary sm" id="addCorpus">＋ 新增</button></section>
+    <div class="tabs">${Object.entries(CATEGORY_LABELS).map(([k,v]) => `<button class="tab ${state.corpusTab===k?'active':''}" data-corpus-tab="${k}">${v}</button>`).join('')}</div>
+    <div class="corpus-toolbar"><span>${CATEGORY_LABELS[state.corpusTab]} · ${items.length} 条</span><div><button class="btn sm ghost" id="resetCategory">重置本类</button><button class="btn sm danger" id="clearCategory">清空</button></div></div>
+    ${groups.map(g => `<section class="corpus-group"><div class="corpus-group-title">${escapeHTML(g)}</div>${items.filter(x => (x.group||'未分类')===g).map(x => `<article class="corpus-item"><div class="corpus-text">${escapeHTML(x.text)}</div><div class="corpus-actions"><span class="corpus-meta">${x.enabled === false ? '停用' : '启用'}</span><div><button class="btn sm ghost" data-edit-id="${x.id}">编辑</button><button class="btn sm danger" data-delete-id="${x.id}">删除</button></div></div></article>`).join('')}</section>`).join('') || '<div class="empty card">本类为空。可以新增，也可以恢复内置数据。</div>'}
+  </div>`;
+  $$('[data-corpus-tab]').forEach(b => b.addEventListener('click', () => {state.corpusTab=b.dataset.corpusTab; renderCorpus();}));
+  $('#addCorpus').addEventListener('click', () => openCorpusEditor());
+  $$('[data-edit-id]').forEach(b => b.addEventListener('click', () => openCorpusEditor(state.corpus.find(x => x.id === b.dataset.editId))));
+  $$('[data-delete-id]').forEach(b => b.addEventListener('click', async () => { if (!confirm('删除这条语料？')) return; await idbDelete(STORE_CORPUS, b.dataset.deleteId); state.corpus=state.corpus.filter(x=>x.id!==b.dataset.deleteId); renderCorpus(); showToast('已删除。'); }));
+  $('#resetCategory').addEventListener('click', resetCurrentCategory);
+  $('#clearCategory').addEventListener('click', clearCurrentCategory);
+}
+
+function openCorpusEditor(item = null) {
+  const isTemplate = state.corpusTab === 'templates';
+  const initialTemplate = item ? normalizeTemplate(item) : null;
+  openModal(`<div class="modal"><div class="modal-handle"></div><h3>${item ? '编辑' : '新增'}${CATEGORY_LABELS[state.corpusTab]}</h3>
+    <div class="col modal-form">
+      <label class="small muted">分组</label><input id="corpusGroup" class="input" value="${escapeHTML(item?.group||'自定义')}">
+      <label class="small muted">文本</label><textarea id="corpusText" class="textarea" ${isTemplate?'placeholder="例如：坚持__，__（动词/效果）__"':''}>${escapeHTML(item?.text||'')}</textarea>
+      ${isTemplate ? `<div class="template-help">句式里的 <b>__</b> 是“可放语块的槽位”。你可以在下面决定每个槽位是否默认按“1 个语块”处理；不勾选就能继续往里放多个语块。</div><div id="slotRules">${templateSlotEditorHTML(initialTemplate, item?.text||'')}</div>` : ''}
+      <label class="small muted">启用</label><div class="row"><div id="corpusEnabled" class="switch ${item?.enabled!==false?'on':''}"></div><span class="small muted">练习时参与抽取</span></div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" data-close-modal>取消</button><button class="btn primary" id="saveCorpus">保存</button></div>
+  </div>`);
+
+  if (isTemplate) {
+    $('#corpusText').addEventListener('input', () => { $('#slotRules').innerHTML = templateSlotEditorHTML(initialTemplate, $('#corpusText').value.trim()); });
+  }
+  $('#saveCorpus').addEventListener('click', async () => {
+    const text = $('#corpusText').value.trim();
+    const group = $('#corpusGroup').value.trim() || '自定义';
+    if (!text) {showToast('请输入文本。'); return;}
+    const record = {id:item?.id || uid('template'), category:state.corpusTab, group, text, enabled:$('#corpusEnabled').classList.contains('on')};
+    if (isTemplate) {
+      if (!text.includes('__')) {showToast('句式至少要包含一个“__”空位。'); return;}
+      record.parts = parseTemplateParts(text);
+      record.slotDefaults = record.parts.filter(x=>x==='__').map((_, i) => {
+        const box = $(`[data-slot-default="${i}"]`, $('#modalRoot'));
+        return box ? box.checked : true;
+      });
     }
-    await idbPut(STORE_CORPUS,record); state.corpus=state.corpus.filter(x=>x.id!==record.id);state.corpus.push(record);closeModal();renderCorpus();showToast('已保存，下一题即可抽取。');
+    await idbPut(STORE_CORPUS, record);
+    state.corpus = state.corpus.filter(x => x.id !== record.id); state.corpus.push(record);
+    closeModal(); renderCorpus(); showToast('已保存，下一题即可抽取。');
   });
-  $('#corpusEnabled').addEventListener('click',e=>e.currentTarget.classList.toggle('on'));
+  $('#corpusEnabled').addEventListener('click', e => e.currentTarget.classList.toggle('on'));
 }
+
 async function resetCurrentCategory(){
   if(!confirm(`将“${CATEGORY_LABELS[state.corpusTab]}”恢复为内置默认数据？本类用户修改会被覆盖。`)) return;
   const defaults=DEFAULT_CORPUS[state.corpusTab]||[]; const old=corpus(state.corpusTab); for(const x of old) await idbDelete(STORE_CORPUS,x.id); await idbBulkPut(STORE_CORPUS,defaults); await loadAll(); renderCorpus(); showToast('已恢复内置数据。');
@@ -666,18 +981,5 @@ async function boot(){
   }catch(err){ console.error(err); document.querySelector('#main').innerHTML='<div class="card"><h2>启动失败</h2><p class="muted">浏览器未能打开 IndexedDB。请确认使用 Safari/Chrome 的正常网页模式后再试。</p></div>'; }
 }
 
-// 修正 renderPractice 的 3 句句式渲染
-const _renderPractice = renderPractice;
-renderPractice = function(){
-  if(!state.practice){ _renderPractice(); return; }
-  const p=state.practice,q=p.question; const elapsed=Math.min(60,Math.floor((Date.now()-q.startedAt)/1000)); const remaining=Math.max(0,60-elapsed);
-  const percent=(p.index/20)*100 + ((elapsed/60)/20)*100;
-  $('#main').innerHTML=`<div class="page practice-page">
-  <div class="practice-head card tight"><div class="row row-between"><span class="question-count">第 ${p.index+1} / 20 题</span><span class="template-badge">${escapeHTML(q.template.text)}</span></div><div class="timer-row"><div id="timer" class="timer ${remaining<=10?'danger':''}">${formatSeconds(remaining)}</div><div id="lifeRow" class="life-row">${'❤'.repeat(p.hearts)}${'♡'.repeat(3-p.hearts)}</div></div><div class="progress-track"><div class="progress-fill" style="width:${Math.min(100,percent)}%"></div></div><div class="row row-between small"><span>连击：<strong>${p.combo}</strong></span><span>本局 XP：<strong>${p.roundXP}</strong></span></div></div>
-  <div class="sentence-list">${renderSentenceBuildersFixed(q)}</div>
-  <div class="pool card"><div class="row row-between"><div><div class="section-title">语块池</div><div class="muted tiny">仅包含本题抽中的 3 个主题词，没有其他主题词干扰项。</div></div><span class="badge">${q.topics.map(t=>escapeHTML(t.text)).join(' · ')}</span></div><div id="poolGrid" class="pool-grid">${renderPool(q)}</div><div class="divider"></div><div class="section-title">通用语块 NPC</div><div class="muted tiny">不限量、无历史记录，仅在当前题有效。</div><div class="common-box"><input id="commonInput" class="input" placeholder="例如：的 / 和 / 更 / 彰显"><button id="addCommon" class="btn primary">添加</button></div></div>
-  <div class="action-bar"><button id="rerollBtn" class="btn ghost">重新出题</button><button id="completeBtn" class="btn primary" ${!allSlotsFilled(q)?'disabled':''}>完成本句</button><button id="abandonBtn" class="btn danger">放弃本题</button></div></div>`;
-  $('#topStats').hidden=false; updateTopStats(); bindPractice();
-};
 
 boot();
