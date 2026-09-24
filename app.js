@@ -74,6 +74,7 @@ const state = {
 };
 
 function uid(prefix='id') { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,9)}`; }
+function cloneData(value) { return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value)); }
 function sample(arr, n) {
   const copy = [...arr];
   for (let i=copy.length-1; i>0; i--) {
@@ -97,9 +98,26 @@ function rankForXP(xp) {
   return {name:'青铜', next:300};
 }
 
+let dbConnection = null;
+let dbOpening = null;
+
 function openDB() {
-  return new Promise((resolve,reject)=>{
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+  if (!('indexedDB' in window)) {
+    return Promise.reject(new Error('IndexedDB is not available in this browsing context.'));
+  }
+  if (dbConnection) return Promise.resolve(dbConnection);
+  if (dbOpening) return dbOpening;
+
+  dbOpening = new Promise((resolve, reject) => {
+    let req;
+    try {
+      req = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch (err) {
+      dbOpening = null;
+      reject(err);
+      return;
+    }
+
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_CORPUS)) db.createObjectStore(STORE_CORPUS, {keyPath:'id'});
@@ -107,40 +125,85 @@ function openDB() {
       if (!db.objectStoreNames.contains(STORE_QUESTIONS)) db.createObjectStore(STORE_QUESTIONS, {keyPath:'id'});
       if (!db.objectStoreNames.contains(STORE_META)) db.createObjectStore(STORE_META, {keyPath:'key'});
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onblocked = () => {
+      reject(new Error('IndexedDB upgrade is blocked by another open connection.'));
+    };
+    req.onsuccess = () => {
+      dbConnection = req.result;
+      dbConnection.onversionchange = () => {
+        try { dbConnection.close(); } catch (_) {}
+        dbConnection = null;
+      };
+      dbConnection.onclose = () => { dbConnection = null; };
+      dbOpening = null;
+      resolve(dbConnection);
+    };
+    req.onerror = () => {
+      dbOpening = null;
+      reject(req.error || new Error('Unable to open IndexedDB.'));
+    };
   });
+
+  return dbOpening;
 }
 
 async function idbGetAll(store) {
   const db = await openDB();
   return new Promise((resolve,reject)=>{
-    const tx = db.transaction(store,'readonly'); const req = tx.objectStore(store).getAll();
-    req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error);
+    const tx = db.transaction(store,'readonly');
+    const req = tx.objectStore(store).getAll();
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+    tx.onerror=()=>reject(tx.error);
   });
 }
 async function idbGet(store,key) {
   const db = await openDB();
-  return new Promise((resolve,reject)=>{ const req=db.transaction(store,'readonly').objectStore(store).get(key); req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error); });
+  return new Promise((resolve,reject)=>{
+    const req=db.transaction(store,'readonly').objectStore(store).get(key);
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
 }
 async function idbPut(store,value) {
   const db = await openDB();
-  return new Promise((resolve,reject)=>{ const req=db.transaction(store,'readwrite').objectStore(store).put(value); req.onsuccess=()=>resolve(); req.onerror=()=>reject(req.error); });
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(store,'readwrite');
+    tx.objectStore(store).put(value);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+    tx.onabort=()=>reject(tx.error || new Error('IndexedDB transaction aborted.'));
+  });
 }
 async function idbDelete(store,key) {
   const db = await openDB();
-  return new Promise((resolve,reject)=>{ const req=db.transaction(store,'readwrite').objectStore(store).delete(key); req.onsuccess=()=>resolve(); req.onerror=()=>reject(req.error); });
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(store,'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+    tx.onabort=()=>reject(tx.error || new Error('IndexedDB transaction aborted.'));
+  });
 }
 async function idbClear(store) {
   const db = await openDB();
-  return new Promise((resolve,reject)=>{ const req=db.transaction(store,'readwrite').objectStore(store).clear(); req.onsuccess=()=>resolve(); req.onerror=()=>reject(req.error); });
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(store,'readwrite');
+    tx.objectStore(store).clear();
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+    tx.onabort=()=>reject(tx.error || new Error('IndexedDB transaction aborted.'));
+  });
 }
 async function idbBulkPut(store, values) {
   const db = await openDB();
   return new Promise((resolve,reject)=>{
-    const tx=db.transaction(store,'readwrite'); const os=tx.objectStore(store);
+    const tx=db.transaction(store,'readwrite');
+    const os=tx.objectStore(store);
     values.forEach(v=>os.put(v));
-    tx.oncomplete=()=>resolve(); tx.onerror=()=>reject(tx.error);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+    tx.onabort=()=>reject(tx.error || new Error('IndexedDB transaction aborted.'));
   });
 }
 
@@ -178,7 +241,7 @@ function inferSlotDefaults(parts) {
 }
 
 function normalizeTemplate(template) {
-  const t = structuredClone(template || {});
+  const t = cloneData(template || {});
   if (!Array.isArray(t.parts) || !t.parts.length) t.parts = parseTemplateParts(String(t.text || ''));
   const slotCount = t.parts.filter(p => p === '__').length;
   if (!Array.isArray(t.slotDefaults) || t.slotDefaults.length !== slotCount) {
@@ -545,68 +608,6 @@ function renderPlacedChip(tok, slotIndex) {
   return `<button class="token-chip filled ${tok.kind} ${state.lastPlacedId === tok.id ? 'just-added' : ''}" draggable="true" data-place-id="${tok.id}" data-slot="${slotIndex}" title="${isCommon ? '点击编辑' : '点击退回语块池'}">${escapeHTML(tok.text)}${isCommon ? '<span class="edit-dot">✎</span>' : ''}</button>`;
 }
 
-function renderPoolCategory(q, kind, title, sub, compact = false) {
-  const used = usedTokenIds(q);
-  const items = q.pool.filter(x => x.kind === kind && !used.has(x.id));
-  return `<div class="pool-section ${kind} ${compact ? 'compact' : ''}">
-    <div class="pool-section-head"><strong>${title}</strong><span>${sub}</span></div>
-    <div class="pool-grid">${items.length ? items.map(tok => `<button class="pool-chip ${tok.kind}" data-pool-id="${tok.id}">${escapeHTML(tok.text)}</button>`).join('') : '<span class="pool-empty">已全部用掉</span>'}</div>
-  </div>`;
-}
-
-function renderPractice(options = {}) {
-  migratePracticeShape();
-  $('#main').innerHTML = buildPracticeHTML();
-  $('#topStats').hidden = !state.practice;
-  updateTopStats();
-  bindPractice();
-  if (options.scrollToSentence !== undefined) {
-    requestAnimationFrame(() => $('#sentence-' + options.scrollToSentence)?.scrollIntoView({behavior:'smooth', block:'center'}));
-  }
-  if (state.lastPlacedId) {
-    const last = document.querySelector(`[data-place-id="${CSS.escape(state.lastPlacedId)}"]`);
-    setTimeout(() => { last?.classList.remove('just-added'); if (state.lastPlacedId) state.lastPlacedId = null; }, 220);
-  }
-}
-
-function updateTopStats() {
-  const p = state.practice;
-  if (!p) { $('#topStats').hidden = true; return; }
-  $('#heartPill').textContent = `❤ ${p.hearts}`;
-  $('#xpPill').textContent = `XP ${state.meta.xp}`;
-  $('#comboPill').textContent = `🔥 ${p.combo}`;
-}
-
-function bindPractice() {
-  $('#startPractice')?.addEventListener('click', startRound);
-  $('#rerollBtn')?.addEventListener('click', openRerollModal);
-  $('#completeBtn')?.addEventListener('click', completeQuestion);
-  $('#abandonBtn')?.addEventListener('click', abandonQuestion);
-  $('#nextSentenceBtn')?.addEventListener('click', advanceToNextSentence);
-  $('#addCommon')?.addEventListener('click', addCommonBlock);
-
-  $$('[data-pool-id]').forEach(btn => btn.addEventListener('click', () => usePoolToken(btn.dataset.poolId)));
-  $$('[data-sentence-select]').forEach(btn => btn.addEventListener('click', () => {
-    const idx = Number(btn.dataset.sentenceSelect);
-    const p = state.practice;
-    if (!p) return;
-    p.activeSentence = idx;
-    const slotCount = getSentenceSlotCount(p.question);
-    const localStart = idx * slotCount;
-    p.activeZone = defaultZoneIndex(p.question.template, p.question.placed.slice(localStart, localStart + slotCount));
-    persistSession();
-    renderPractice({scrollToSentence: idx});
-  }));
-  $$('.token-zone').forEach(zone => {
-    zone.addEventListener('click', e => {
-      if (e.target.closest('.token-chip')) return;
-      setActiveZone(Number(zone.dataset.sentence), Number(zone.dataset.localSlot));
-    });
-    bindDropZone(zone);
-  });
-  $$('.token-chip').forEach(bindDragChip);
-}
-
 function usePoolToken(id) {
   const p = state.practice; if (!p || p.question.reviewing) return;
   const tok = tokenFromPool(p.question, id); if (!tok) return;
@@ -804,7 +805,7 @@ function startRound({makeupTarget = null, mode = null} = {}) {
 
 function persistSession() {
   if (!state.practice) { state.meta.session = null; saveMeta(); return; }
-  state.meta.session = structuredClone(state.practice);
+  state.meta.session = cloneData(state.practice);
   saveMeta();
 }
 
@@ -1142,7 +1143,7 @@ async function migrateBuiltinTemplateCorpus() {
     if (!legacy[item.id]) continue;
     if (item.text === legacy[item.id]) {
       const next = DEFAULT_CORPUS.templates.find(x => x.id === item.id);
-      if (next) { await idbPut(STORE_CORPUS, structuredClone(next)); changed = true; }
+      if (next) { await idbPut(STORE_CORPUS, cloneData(next)); changed = true; }
     }
   }
   if (changed) await loadAll();
@@ -1152,8 +1153,15 @@ async function boot(){
   try{
     await openDB(); await seedIfNeeded(); await loadAll(); await migrateBuiltinTemplateCorpus(); applyTheme(); await restoreSession();
     if(!state.practice) renderPage('today'); else renderPage('practice');
-    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js').catch(err=>console.warn('SW registration failed',err)); }
-  }catch(err){ console.error(err); document.querySelector('#main').innerHTML='<div class="card"><h2>启动失败</h2><p class="muted">浏览器未能打开 IndexedDB。请确认使用 Safari/Chrome 的正常网页模式后再试。</p></div>'; }
+    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=4', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
+  }catch(err){
+    console.error('Startup failed:', err);
+    const reason = err?.name === 'SecurityError'
+      ? '当前浏览环境禁止本地存储。'
+      : (err?.message || '应用启动失败。');
+    document.querySelector('#main').innerHTML=`<div class="card startup-error"><h2>启动失败</h2><p class="muted">${escapeHTML(reason)}</p><p class="muted small">请确认使用 https:// 网页打开，而不是 file:// 本地文件。如果这是刚更新的版本，可以点击重试。</p><button class="btn primary btn-block" id="retryBoot">重试</button></div>`;
+    $('#retryBoot')?.addEventListener('click',()=>location.reload());
+  }
 }
 
 
