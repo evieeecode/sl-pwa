@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <meta name="theme-color" content="#f7f8fc" />
+  <meta name="description" content="申论标题与分论点八股限时操练，本地优先、离线可用。" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="八股操练" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="style.css" />
+  <title>申论八股操练</title>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand">八股操练</div>
+      <div id="topStats" class="top-stats" hidden>
+        <span class="heart-pill" id="heartPill">❤ 3</span>
+        <span class="xp-pill" id="xpPill">XP 0</span>
+        <span class="combo-pill" id="comboPill">🔥 0</span>
+      </div>
+    </header>
+
+    <main id="main" class="main-content"></main>
+
+    <nav class="bottom-nav" aria-label="主导航">
+      <button class="nav-btn active" data-page="today"><span>☀️</span><b>今日</b></button>
+      <button class="nav-btn" data-page="practice"><span>⏱️</span><b>练习</b></button>
+      <button class="nav-btn" data-page="corpus"><span>🗂️</span><b>语料库</b></button>
+      <button class="nav-btn" data-page="stats"><span>📊</span><b>统计</b></button>
+      <button class="nav-btn" data-page="settings"><span>⚙️</span><b>设置</b></button>
+    </nav>
+  </div>
+
+  <div id="modalRoot" class="modal-root" hidden></div>
+  <input id="importFile" type="file" accept="application/json,.json" hidden />
+
+  <script src="app.js"></script>
+</body>
+</html>
