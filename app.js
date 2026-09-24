@@ -16,8 +16,8 @@ const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 const DEFAULT_CORPUS = {
   templates: [
     { id: 't1', category: 'templates', group: '核心结构', text: '以__为__，__', parts: ['以', '__', '为', '__', '，', '__'], slotDefaults: [true, true, false], slotHints: ['', '', ''], enabled: true },
-    { id: 't2', category: 'templates', group: '核心结构', text: '坚持__，__', parts: ['坚持', '__', '，', '__'], slotDefaults: [true, false], slotHints: ['', ''], enabled: true },
-    { id: 't3', category: 'templates', group: '核心结构', text: '__，__', parts: ['__', '，', '__'], slotDefaults: [true, false], slotHints: ['动词', '动词'], enabled: true }
+    { id: 't2', category: 'templates', group: '核心结构', text: '坚持__ __，__', parts: ['坚持', '__', ' ', '__', '，', '__'], slotDefaults: [true, true, false], slotHints: ['', '', ''], enabled: true },
+    { id: 't3', category: 'templates', group: '核心结构', text: '__ __，__', parts: ['__', ' ', '__', '，', '__'], slotDefaults: [true, true, false], slotHints: ['动词', '', ''], enabled: true }
   ],
   metaphors: [
     ...['旗','旗帜','纲','纲领','魂','本','舵','灯塔','罗盘','北斗星','定盘星','压舱石'].map((text,i)=>({id:`m-root-${i}`,category:'metaphors',group:'根本',text})),
@@ -256,8 +256,17 @@ function normalizeTemplate(template) {
 function parseTemplateParts(text) {
   const raw = String(text || '').split('__');
   const parts = [];
-  raw.forEach((part, i) => { parts.push(part); if (i < raw.length - 1) parts.push('__'); });
+  raw.forEach((part, i) => {
+    parts.push(part);
+    if (i < raw.length - 1) parts.push('__');
+  });
   return parts;
+}
+
+// 句式中的 __ 本身就是“语块槽位”。仅用于排版的空白不再单独渲染，
+// 避免出现“句式空格 + 语块空格”两个空白同时存在的感觉。
+function isTemplateWhitespace(part) {
+  return typeof part === 'string' && /^[\s\u00a0]*$/.test(part);
 }
 
 function topicGroupSample(allTopics, n = 3) {
@@ -520,15 +529,17 @@ function renderSentenceCard(q, sentenceIndex, active) {
   const t = normalizeTemplate(q.template);
   const slotCount = t.parts.filter(p => p === '__').length;
   const content = t.parts.map((part, i) => {
+    if (isTemplateWhitespace(part)) return '';
     if (part !== '__') return `<span class="static-text">${escapeHTML(part)}</span>`;
     const localSlot = t.parts.slice(0, i).filter(x => x === '__').length;
     const idx = sentenceIndex * slotCount + localSlot;
     const chips = (q.placed[idx] || []).map(tok => renderPlacedChip(tok, idx)).join('');
-    const hint = t.slotHints?.[localSlot] || (t.slotDefaults?.[localSlot] ? '语块' : '可继续添加');
+    const hint = t.slotHints?.[localSlot] || (t.slotDefaults?.[localSlot] ? '语块' : '可继续');
     const selected = active && state.practice?.activeZone === localSlot;
-    return `<button class="token-zone ${chips ? 'has-token' : ''} ${selected ? 'selected' : ''}" data-slot="${idx}" data-sentence="${sentenceIndex}" data-local-slot="${localSlot}">
+    // 用 div 作为槽位容器，避免 button 嵌套 button 导致 iOS Safari 点击/拖动行为异常。
+    return `<div class="token-zone ${chips ? 'has-token' : ''} ${selected ? 'selected' : ''}" data-slot="${idx}" data-sentence="${sentenceIndex}" data-local-slot="${localSlot}">
       ${chips || `<span class="zone-placeholder">${escapeHTML(hint)}</span>`}
-    </button>`;
+    </div>`;
   }).join('');
   return `<article class="sentence-card ${active ? 'active' : ''}">
     <div class="sentence-head"><span class="sentence-number">${sentenceIndex + 1}</span><span>分论点 ${sentenceIndex + 1}</span><span class="sentence-status">${sentenceFilled(q, sentenceIndex) ? '✓' : ''}</span></div>
@@ -541,6 +552,7 @@ function renderReviewSentence(q, sentenceIndex) {
   const slotCount = t.parts.filter(p => p === '__').length;
   let slotIndex = 0;
   const html = t.parts.map(part => {
+    if (isTemplateWhitespace(part)) return '';
     if (part !== '__') return `<span class="static-text">${escapeHTML(part)}</span>`;
     const chips = (q.placed[sentenceIndex * slotCount + slotIndex++] || []).map(tok => `<span class="review-chip ${tok.kind}">${escapeHTML(tok.text)}</span>`).join('');
     return `<span class="review-slot">${chips}</span>`;
@@ -605,7 +617,7 @@ function bindPractice() {
 
 function renderPlacedChip(tok, slotIndex) {
   const isCommon = tok.kind === 'common';
-  return `<button class="token-chip filled ${tok.kind} ${state.lastPlacedId === tok.id ? 'just-added' : ''}" draggable="true" data-place-id="${tok.id}" data-slot="${slotIndex}" title="${isCommon ? '点击编辑' : '点击退回语块池'}">${escapeHTML(tok.text)}${isCommon ? '<span class="edit-dot">✎</span>' : ''}</button>`;
+  return `<button class="token-chip filled ${tok.kind} ${state.lastPlacedId === tok.id ? 'just-added' : ''}" data-place-id="${tok.id}" data-slot="${slotIndex}" title="${isCommon ? '点击编辑' : '点击退回语块池'}">${escapeHTML(tok.text)}${isCommon ? '<span class="edit-dot">✎</span>' : ''}</button>`;
 }
 
 function usePoolToken(id) {
@@ -676,10 +688,6 @@ function bindDragChip(chip) {
     else removePlacedToken(id);
   });
   chip.addEventListener('pointerdown', e => startPointerDrag(e, chip));
-  chip.addEventListener('dragstart', e => {
-    chip.dataset.dragged = '1';
-    e.dataTransfer.setData('text/plain', chip.dataset.placeId);
-  });
 }
 
 function bindDropZone(zone) {
@@ -694,62 +702,167 @@ function bindDropZone(zone) {
 }
 
 function insertionIndexFromPoint(zone, x, y, movingId) {
-  const chips = $$('.token-chip', zone).filter(el => el.dataset.placeId !== movingId);
+  const chips = $$('.token-chip', zone).filter(el => el.dataset.placeId !== movingId && !el.classList.contains('drag-ghost'));
   if (!chips.length) return 0;
+
+  // 多邻国式“插入线”：在芯片左侧就插到它前面，否则插到它后面。
   for (let i = 0; i < chips.length; i++) {
     const r = chips[i].getBoundingClientRect();
-    const horizontal = x < r.left + r.width / 2;
-    const verticalBefore = y < r.top + r.height / 2;
-    if (verticalBefore || horizontal) return i;
+    const sameRow = y >= r.top - 8 && y <= r.bottom + 8;
+    if (sameRow && x < r.left + r.width / 2) return i;
   }
   return chips.length;
+}
+
+function showDropPlaceholder(zone, index) {
+  const drag = state.dragging;
+  if (!drag?.placeholder) return;
+  const placeholder = drag.placeholder;
+  const chips = $$('.token-chip', zone).filter(el => el !== drag.source && !el.classList.contains('drag-ghost'));
+  const safeIndex = Math.max(0, Math.min(index, chips.length));
+  const ref = chips[safeIndex];
+  if (ref) zone.insertBefore(placeholder, ref);
+  else zone.appendChild(placeholder);
 }
 
 function startPointerDrag(e, chip) {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const id = chip.dataset.placeId;
-  let moved = false, active = false, timer = null;
   const startX = e.clientX, startY = e.clientY;
+  let holdTimer = null;
+  let active = false;
+  let moved = false;
+
   const cleanup = () => {
-    clearTimeout(timer);
+    clearTimeout(holdTimer);
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', cancel);
+    if (state.dragging?.raf) cancelAnimationFrame(state.dragging.raf);
+    document.body.classList.remove('drag-mode');
     $$('.token-zone.drag-target').forEach(z => z.classList.remove('drag-target'));
-    chip.classList.remove('dragging');
+    $$('.token-zone .drop-placeholder').forEach(el => el.remove());
+
+    if (state.dragging?.ghost) state.dragging.ghost.remove();
+    if (state.dragging?.source) {
+      state.dragging.source.style.visibility = '';
+      state.dragging.source.classList.remove('drag-source');
+      state.dragging.source.style.pointerEvents = '';
+    }
     state.dragging = null;
   };
+
   const move = ev => {
-    if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 8) moved = true;
+    const distance = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+    if (distance > 8) moved = true;
+
+    // 手指尚未长按激活时，允许页面保持自然滚动。
     if (!active) return;
     ev.preventDefault();
-    const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.token-zone');
-    $$('.token-zone.drag-target').forEach(z => z.classList.remove('drag-target'));
-    if (target) target.classList.add('drag-target');
+
+    const drag = state.dragging;
+    if (!drag) return;
+    drag.dx = ev.clientX - drag.startX;
+    drag.dy = ev.clientY - drag.startY;
+    if (!drag.raf) {
+      drag.raf = requestAnimationFrame(() => {
+        drag.ghost.style.transform = `translate3d(${drag.dx}px, ${drag.dy}px, 0) scale(1.06) rotate(-1.5deg)`;
+        drag.raf = 0;
+      });
+    }
+
+    const pointTarget = document.elementFromPoint(ev.clientX, ev.clientY);
+    const target = pointTarget?.closest('.token-zone');
+
+    if (target) {
+      const targetSlot = Number(target.dataset.slot);
+      const index = insertionIndexFromPoint(target, ev.clientX, ev.clientY, id);
+      if (drag.lastTargetSlot !== targetSlot || drag.lastTargetIndex !== index) {
+        $$('.token-zone.drag-target').forEach(z => z.classList.remove('drag-target'));
+        target.classList.add('drag-target');
+        showDropPlaceholder(target, index);
+        drag.targetSlot = targetSlot;
+        drag.targetIndex = index;
+        drag.lastTargetSlot = targetSlot;
+        drag.lastTargetIndex = index;
+      }
+    }
   };
+
   const up = ev => {
     if (active) {
-      const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.token-zone');
-      if (target) {
-        const index = insertionIndexFromPoint(target, ev.clientX, ev.clientY, id);
+      const drag = state.dragging;
+      const targetSlot = drag?.targetSlot;
+      const targetIndex = drag?.targetIndex;
+      if (Number.isInteger(targetSlot)) {
         chip.dataset.dragged = '1';
-        reorderPlaced(id, Number(target.dataset.slot), index);
+        cleanup();
+        reorderPlaced(id, targetSlot, targetIndex);
+        return;
       }
-    } else if (!moved) {
+      cleanup();
+      return;
+    }
+
+    if (!moved) {
       chip.dataset.pointerHandled = '1';
       chip.dataset.dragged = '0';
       const p = state.practice;
       const tok = p?.question.pool.find(x => x.id === id);
+      cleanup();
       if (tok?.kind === 'common') editCommonToken(id); else removePlacedToken(id);
+      return;
     }
     cleanup();
   };
-  timer = setTimeout(() => {
+
+  const cancel = () => cleanup();
+
+  holdTimer = setTimeout(() => {
+    const rect = chip.getBoundingClientRect();
     active = true;
-    state.dragging = {id, moved:false};
-    chip.classList.add('dragging');
-  }, 260);
+    state.dragging = {
+      id, source: chip, startX: e.clientX, startY: e.clientY,
+      targetSlot: Number(chip.dataset.slot), targetIndex: 0, lastTargetSlot: null, lastTargetIndex: null,
+      dx: 0, dy: 0, raf: 0, ghost: null, placeholder: null
+    };
+
+    const ghost = chip.cloneNode(true);
+    ghost.classList.remove('just-added');
+    ghost.classList.add('drag-ghost');
+    Object.assign(ghost.style, {
+      position: 'fixed', left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`,
+      height: `${rect.height}px`, margin: '0', zIndex: '9999', pointerEvents: 'none',
+      transition: 'none',
+      transform: 'scale(1.06) rotate(-1.5deg)'
+    });
+    document.body.appendChild(ghost);
+
+    const placeholder = document.createElement('span');
+    placeholder.className = 'drop-placeholder';
+    placeholder.style.width = `${rect.width}px`;
+    placeholder.style.height = `${rect.height}px`;
+
+    chip.classList.add('drag-source');
+    chip.style.visibility = 'hidden';
+    chip.style.pointerEvents = 'none';
+
+    state.dragging.ghost = ghost;
+    state.dragging.placeholder = placeholder;
+    document.body.classList.add('drag-mode');
+
+    const zone = chip.closest('.token-zone');
+    if (zone) {
+      zone.classList.add('drag-target');
+      showDropPlaceholder(zone, Number([...zone.querySelectorAll('.token-chip')].indexOf(chip)));
+      state.dragging.targetSlot = Number(zone.dataset.slot);
+      state.dragging.targetIndex = insertionIndexFromPoint(zone, e.clientX, e.clientY, id);
+    }
+  }, 190);
+
   window.addEventListener('pointermove', move, {passive:false});
   window.addEventListener('pointerup', up, {once:true});
+  window.addEventListener('pointercancel', cancel, {once:true});
 }
 
 function removePlacedToken(id) {
@@ -1051,7 +1164,7 @@ function openCorpusEditor(item = null) {
   openModal(`<div class="modal"><div class="modal-handle"></div><h3>${item ? '编辑' : '新增'}${CATEGORY_LABELS[state.corpusTab]}</h3>
     <div class="col modal-form">
       <label class="small muted">分组</label><input id="corpusGroup" class="input" value="${escapeHTML(item?.group||'自定义')}">
-      <label class="small muted">文本</label><textarea id="corpusText" class="textarea" ${isTemplate?'placeholder="例如：坚持__，__（动词/效果）__"':''}>${escapeHTML(item?.text||'')}</textarea>
+      <label class="small muted">文本</label><textarea id="corpusText" class="textarea" ${isTemplate?'placeholder="例如：坚持__ __，__"':''}>${escapeHTML(item?.text||'')}</textarea>
       ${isTemplate ? `<div class="template-help">逗号前默认 1 个语块；逗号后默认不限。下面可单独调整。</div><div id="slotRules">${templateSlotEditorHTML(initialTemplate, item?.text||'')}</div>` : ''}
       <label class="small muted">启用</label><div class="row"><div id="corpusEnabled" class="switch ${item?.enabled!==false?'on':''}"></div><span class="small muted">练习时参与抽取</span></div>
     </div>
@@ -1134,14 +1247,14 @@ function showToast(text){ let el=$('.toast'); if(!el){el=document.createElement(
 
 async function migrateBuiltinTemplateCorpus() {
   const legacy = {
-    t1: '以__为__，__（动词/效果）__',
-    t2: '坚持__，__（动词/效果）__',
-    t3: '__（动词）__，__（动词）__'
+    t1: ['以__为__，__（动词/效果）__'],
+    t2: ['坚持__，__（动词/效果）__', '坚持__，__'],
+    t3: ['__（动词）__，__（动词）__', '__，__']
   };
   let changed = false;
   for (const item of corpus('templates')) {
     if (!legacy[item.id]) continue;
-    if (item.text === legacy[item.id]) {
+    if (legacy[item.id].includes(item.text)) {
       const next = DEFAULT_CORPUS.templates.find(x => x.id === item.id);
       if (next) { await idbPut(STORE_CORPUS, cloneData(next)); changed = true; }
     }
@@ -1153,7 +1266,7 @@ async function boot(){
   try{
     await openDB(); await seedIfNeeded(); await loadAll(); await migrateBuiltinTemplateCorpus(); applyTheme(); await restoreSession();
     if(!state.practice) renderPage('today'); else renderPage('practice');
-    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=4', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
+    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=5', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
   }catch(err){
     console.error('Startup failed:', err);
     const reason = err?.name === 'SecurityError'
