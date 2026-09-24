@@ -588,9 +588,14 @@ function renderPractice(options = {}) {
 function updateTopStats() {
   const p = state.practice;
   if (!p) { $('#topStats').hidden = true; return; }
-  $('#heartPill').innerHTML = `<img class="stat-icon" src="icons/heart.svg" alt="" aria-hidden="true"><span>${p.hearts}</span>`;
-  $('#xpPill').innerHTML = `<img class="stat-icon" src="icons/XP.svg" alt="" aria-hidden="true"><span>${state.meta.xp}</span>`;
-  $('#comboPill').innerHTML = `<img class="stat-icon" src="icons/flame.svg" alt="" aria-hidden="true"><span>${p.combo}</span>`;
+  $('#topStats').hidden = false;
+  // 只更新数字，保留现有 SVG DOM，避免每次点击语块时图片重新创建而产生闪烁。
+  const heartCount = $('#heartCount');
+  const xpCount = $('#xpCount');
+  const comboCount = $('#comboCount');
+  if (heartCount) heartCount.textContent = String(p.hearts);
+  if (xpCount) xpCount.textContent = String(state.meta.xp);
+  if (comboCount) comboCount.textContent = String(p.combo);
 }
 
 function bindPractice() {
@@ -1266,7 +1271,7 @@ async function boot(){
   try{
     await openDB(); await seedIfNeeded(); await loadAll(); await migrateBuiltinTemplateCorpus(); applyTheme(); await restoreSession();
     if(!state.practice) renderPage('today'); else renderPage('practice');
-    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=6', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
+    if('serviceWorker' in navigator){ navigator.serviceWorker.register('./sw.js?v=7', {updateViaCache:'none'}).catch(err=>console.warn('SW registration failed',err)); }
   }catch(err){
     console.error('Startup failed:', err);
     const reason = err?.name === 'SecurityError'

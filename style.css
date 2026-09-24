@@ -545,8 +545,8 @@ html[data-theme="dark"] .sentence-card {
   color: #71808d;
 }
 .nav-btn img {
-  width: 25px;
-  height: 25px;
+  width: 52px;
+  height: 52px;
   object-fit: contain;
   display: block;
   filter: grayscale(1) opacity(.55);
@@ -559,7 +559,7 @@ html[data-theme="dark"] .sentence-card {
 }
 .nav-btn.active img {
   filter: grayscale(1) opacity(.77);
-  transform: translateY(-1px) scale(1.02);
+  transform: translateY(-1px) scale(1.01);
 }
 .nav-btn:active img { transform: scale(.92); }
 html[data-theme="dark"] .bottom-nav {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'shenlun-eightfold-v6';
+const CACHE_NAME = 'shenlun-eightfold-v7';
 const CORE = [
   './',
   './index.html',

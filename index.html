@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-title" content="八股操练" />
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=7" />
   <title>申论八股操练</title>
 </head>
 <body>
@@ -18,9 +18,9 @@
     <header class="topbar">
       <div class="brand">八股操练</div>
       <div id="topStats" class="top-stats" hidden>
-        <span class="heart-pill" id="heartPill">❤ 3</span>
-        <span class="xp-pill" id="xpPill">XP 0</span>
-        <span class="combo-pill" id="comboPill">🔥 0</span>
+        <span class="heart-pill" id="heartPill"><img class="stat-icon" src="icons/heart.svg" alt="" aria-hidden="true"><span id="heartCount">3</span></span>
+        <span class="xp-pill" id="xpPill"><img class="stat-icon" src="icons/XP.svg" alt="" aria-hidden="true"><span id="xpCount">0</span></span>
+        <span class="combo-pill" id="comboPill"><img class="stat-icon" src="icons/flame.svg" alt="" aria-hidden="true"><span id="comboCount">0</span></span>
       </div>
     </header>
 
@@ -38,6 +38,6 @@
   <div id="modalRoot" class="modal-root" hidden></div>
   <input id="importFile" type="file" accept="application/json,.json" hidden />
 
-  <script src="app.js"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
